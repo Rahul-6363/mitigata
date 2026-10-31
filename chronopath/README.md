@@ -24,6 +24,9 @@ that, with a measurement, rather than guess either way — see
 
 ---
 
+> **Using the website?** **[WEBSITE_GUIDE.md](WEBSITE_GUIDE.md)** explains every
+> part of the dashboard with real examples.
+
 > **New to this project?** Read **[START_HERE.md](START_HERE.md)** first — it
 > explains the problem, the jargon and what we built, assuming no security
 > background.
@@ -89,6 +92,40 @@ successes**. The signal is four orders of magnitude rarer than the noise.
 
 Full write-up, including the two metrics that do not pass and why:
 **[FIREX_RESULTS.md](FIREX_RESULTS.md)**
+
+---
+
+## 🔎 The investigator
+
+A conventional system tells the analyst what it detected. The investigator
+(`src/elliot/`) reads what ChronoPath established and asks what an experienced,
+sceptical analyst would: **what does not fit, what correlation left out, what
+else could explain this, and what to check next.**
+
+| It does | How |
+|---|---|
+| Notices what does not fit | Analysts for out-of-order kill-chain stages, short-lived accounts, logins with or without prior failures, off-hours and machine-speed timing, weak links, one address behind many accounts |
+| Finds overlooked connections | Queries the whole detection table for the incident's accounts, addresses and machines *outside* the incident |
+| Weighs competing theories | Six theories per incident (outsider, insider, routine admin, automation, mis-merged activity, earlier start), each with evidence for and against; two strong contradictions abandon one, with the reason stated |
+| Argues with itself | A seven-question self-review per theory; confidence is capped while sources the conclusion needs were not supplied |
+| Plans | Next moves ranked by relevance, plus the questions each technique raises (compromised account, process tree, lateral movement, exfiltration, evasion) |
+| Remembers | Per-incident memory: examined evidence, decisions, rejected theories, completed moves (not suggested again unless their evidence changes) |
+
+**It never invents evidence.** Every statement cites an item in the evidence
+pack (E = detection, L = link, G = gap, X = elsewhere in the data, P =
+prediction) and is labelled fact, inference, hypothesis, prediction or
+recommendation. It works with no API key. With `GROQ_API_KEY` set, a language
+model may phrase the answer — and that answer is discarded if it cites an ID,
+timestamp or address that is not in the pack, or claims to have done anything.
+
+```bash
+python src/investigate.py --db firex30.db                     # the brief for INC-01
+python src/investigate.py --db firex30.db --ask "What am I missing?"
+python src/investigate.py --db firex30.db --chat              # interactive session
+streamlit run src/app.py                                      # the "Investigator" tab
+python src/api.py   # GET /incidents/INC-01/elliot, /incidents/INC-01/elliot/ask?q=...
+python tests/test_elliot.py                                   # 8 tests, incl. no-fabrication
+```
 
 ---
 

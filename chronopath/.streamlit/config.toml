@@ -1,0 +1,14 @@
+# A plain, academic look: white paper, serif text, one muted blue for links
+# and charts. The finer typography lives in the CSS block in src/app.py.
+
+[theme]
+base = "light"
+primaryColor = "#1f4e8c"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f6f6f3"
+textColor = "#1a1a1a"
+font = "serif"
+
+[client]
+# Hide the Deploy button and developer menu; the page should read as a site.
+toolbarMode = "minimal"

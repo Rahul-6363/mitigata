@@ -10,3 +10,6 @@ __pycache__/
 # Keep the template committed so others know what to create
 !.env.example
 *.db.wal
+
+# Investigator memory (one JSON file per incident, analyst-specific)
+investigations/

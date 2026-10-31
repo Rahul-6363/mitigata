@@ -105,53 +105,45 @@ def collect_entities(db_path="chronopath.db"):
     if not os.path.exists(db_path):
         return {}
 
+    # One GROUP BY in DuckDB rather than a Python loop over every row. The loop
+    # was fine at a few hundred thousand detections; at the 1.5 million from
+    # firex-30G.log it took ~12 s of the dashboard's load. Same rules:
+    # placeholders are skipped, empty stages/techniques/rules/timestamps
+    # are not collected.
+    placeholders = ", ".join("'" + p + "'" for p in sorted(PLACEHOLDERS))
+    nonempty = lambda c: f"{c} IS NOT NULL AND {c} <> ''"  # noqa: E731
+    branches = " UNION ALL ".join(
+        f"SELECT '{kind}' AS kind, CAST(\"{field}\" AS VARCHAR) AS v, severity, "
+        f"kill_chain_stage, mitre_technique, rule_name, timestamp "
+        f"FROM suspicious_events"
+        for kind, fields in ENTITY_COLUMNS.items() for field in fields)
     con = duckdb.connect(db_path, read_only=True)
     try:
-        rows = con.execute("""
-            SELECT host, user, src_ip, dest_ip, process,
-                   severity, kill_chain_stage, mitre_technique, rule_name,
-                   timestamp
-            FROM suspicious_events
+        rows = con.execute(f"""
+            SELECT kind, v, COUNT(*) AS n,
+                   GREATEST(0, MAX(coalesce(severity, 0))) AS sev,
+                   list(DISTINCT kill_chain_stage) FILTER (WHERE {nonempty('kill_chain_stage')}),
+                   list(DISTINCT mitre_technique) FILTER (WHERE {nonempty('mitre_technique')}),
+                   list(DISTINCT rule_name) FILTER (WHERE {nonempty('rule_name')}),
+                   MIN(timestamp) FILTER (WHERE {nonempty('timestamp')}),
+                   MAX(timestamp) FILTER (WHERE {nonempty('timestamp')})
+            FROM ({branches}) AS e
+            WHERE v IS NOT NULL
+              AND trim(v, ' \t\n\r\x0b\x0c') NOT IN ({placeholders})
+            GROUP BY kind, v
         """).fetchall()
     except duckdb.Error:
         return {}
     finally:
         con.close()
 
-    cols = ["host", "user", "src_ip", "dest_ip", "process",
-            "severity", "kill_chain_stage", "mitre_technique", "rule_name",
-            "timestamp"]
-
-    entities = defaultdict(lambda: {
-        "count": 0, "max_severity": 0, "stages": set(),
-        "techniques": set(), "rules": set(),
-        "first_seen": None, "last_seen": None,
-    })
-
-    for row in rows:
-        rec = dict(zip(cols, row))
-        for kind, fields in ENTITY_COLUMNS.items():
-            for field in fields:
-                value = rec.get(field)
-                if not _usable(value):
-                    continue
-                e = entities[(kind, str(value))]
-                e["count"] += 1
-                e["max_severity"] = max(e["max_severity"],
-                                        rec.get("severity") or 0)
-                if rec.get("kill_chain_stage"):
-                    e["stages"].add(rec["kill_chain_stage"])
-                if rec.get("mitre_technique"):
-                    e["techniques"].add(rec["mitre_technique"])
-                if rec.get("rule_name"):
-                    e["rules"].add(rec["rule_name"])
-                ts = rec.get("timestamp")
-                if ts:
-                    if e["first_seen"] is None or ts < e["first_seen"]:
-                        e["first_seen"] = ts
-                    if e["last_seen"] is None or ts > e["last_seen"]:
-                        e["last_seen"] = ts
-
+    entities = {}
+    for kind, value, n, sev, stages, techs, rules, first, last in rows:
+        entities[(kind, value)] = {
+            "count": n, "max_severity": sev, "stages": set(stages or []),
+            "techniques": set(techs or []), "rules": set(rules or []),
+            "first_seen": first, "last_seen": last,
+        }
     return entities
 
 
@@ -190,20 +182,23 @@ def rank_entities(db_path="chronopath.db", top_n=10):
     "which accounts are odd?" rather than wanting one merged list where hosts
     and IPs compete with each other for the top spot.
     """
-    entities = collect_entities(db_path)
-    if not entities:
-        return {}
-
     # Normalise rarity within each kind. A host appearing 500 times is normal;
     # a user appearing 500 times may not be. Comparing each entity only against
     # others of its own kind keeps the scores meaningful.
-    by_kind = defaultdict(list)
-    for (kind, value), stats in entities.items():
-        by_kind[kind].append((value, stats))
+    #
+    # Scored in DuckDB first, because only the top of each list is shown and
+    # firex-30G.log has 1.5 million distinct destination addresses -- building
+    # every entity's detail lists cost ~20 s of the dashboard's load. SQL
+    # ranks with the same formula as score_entity(); the best `top_n + 50` per
+    # kind are then scored exactly in Python, which absorbs any rounding
+    # difference at the cut-off.
+    by_kind = _top_candidates(db_path, top_n + 50)
+    if not by_kind:
+        return {}
 
     results = {}
     for kind, items in by_kind.items():
-        max_count = max(s["count"] for _, s in items)
+        max_count = items[0][1]["max_count"]
         scored = []
         for value, stats in items:
             scored.append({
@@ -218,10 +213,71 @@ def rank_entities(db_path="chronopath.db", top_n=10):
                 "first_seen": stats["first_seen"],
                 "last_seen": stats["last_seen"],
             })
-        scored.sort(key=lambda x: (-x["anomaly_score"], x["event_count"]))
+        # First-seen then value break ties, so equal scores list the same way
+        # on every run.
+        scored.sort(key=lambda x: (-x["anomaly_score"], x["event_count"],
+                                   str(x["first_seen"]), x["value"]))
         results[kind] = scored[:top_n]
 
     return results
+
+
+def _top_candidates(db_path, limit):
+    """{kind: [(value, stats), ...]} for the `limit` best-scoring entities per kind."""
+    if not os.path.exists(db_path):
+        return {}
+    placeholders = ", ".join("'" + p + "'" for p in sorted(PLACEHOLDERS))
+    nonempty = lambda c: f"{c} IS NOT NULL AND {c} <> ''"  # noqa: E731
+    branches = " UNION ALL ".join(
+        f"SELECT '{kind}' AS kind, CAST(\"{field}\" AS VARCHAR) AS v, severity, "
+        f"kill_chain_stage, mitre_technique, rule_name, timestamp "
+        f"FROM suspicious_events"
+        for kind, fields in ENTITY_COLUMNS.items() for field in fields)
+    con = duckdb.connect(db_path, read_only=True)
+    try:
+        rows = con.execute(f"""
+            WITH e AS (
+                SELECT * FROM ({branches})
+                WHERE v IS NOT NULL
+                  AND trim(v, ' \t\n\r\x0b\x0c') NOT IN ({placeholders})
+            ), g AS (
+                SELECT kind, v, COUNT(*) AS n,
+                       GREATEST(0, MAX(coalesce(severity, 0))) AS sev,
+                       COUNT(DISTINCT kill_chain_stage)
+                           FILTER (WHERE {nonempty('kill_chain_stage')}) AS stages,
+                       MIN(timestamp) FILTER (WHERE {nonempty('timestamp')}) AS first,
+                       MAX(timestamp) FILTER (WHERE {nonempty('timestamp')}) AS last
+                FROM e GROUP BY kind, v
+            ), s AS (
+                SELECT *, MAX(n) OVER (PARTITION BY kind) AS mx FROM g
+            ), picked AS (
+                SELECT * FROM s
+                QUALIFY row_number() OVER (
+                    PARTITION BY kind
+                    ORDER BY (CASE WHEN mx > 1 THEN
+                                  GREATEST(0.0, LEAST(1.0, 1.0 - ln(GREATEST(n, 1)) / ln(mx)))
+                              ELSE 1.0 END) * 50
+                             + sev / 10.0 * 30 + LEAST(stages / 4.0, 1.0) * 20 DESC,
+                             n, first, v) <= ?
+            )
+            SELECT p.kind, p.v, p.n, p.sev, p.first, p.last, p.mx,
+                   list(DISTINCT e.kill_chain_stage) FILTER (WHERE {nonempty('e.kill_chain_stage')}),
+                   list(DISTINCT e.mitre_technique) FILTER (WHERE {nonempty('e.mitre_technique')}),
+                   list(DISTINCT e.rule_name) FILTER (WHERE {nonempty('e.rule_name')})
+            FROM picked p JOIN e ON e.kind = p.kind AND e.v = p.v
+            GROUP BY p.kind, p.v, p.n, p.sev, p.first, p.last, p.mx
+        """, [limit]).fetchall()
+    except duckdb.Error:
+        return {}
+    finally:
+        con.close()
+    by_kind = defaultdict(list)
+    for kind, value, n, sev, first, last, mx, stages, techs, rules in rows:
+        by_kind[kind].append((value, {
+            "count": n, "max_severity": sev, "stages": set(stages or []),
+            "techniques": set(techs or []), "rules": set(rules or []),
+            "first_seen": first, "last_seen": last, "max_count": mx}))
+    return by_kind
 
 
 def activity_timeline(db_path="chronopath.db", buckets=24):

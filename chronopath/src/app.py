@@ -31,6 +31,7 @@ SATISFIES
   B-3   raw alerts merged shown per incident
 """
 
+import html
 import os
 import subprocess
 import sys
@@ -40,6 +41,7 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import graph_engine  # noqa: E402
+from elliot import ui as elliot_ui  # noqa: E402
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -150,6 +152,89 @@ COLOR_EXTERNAL = "#862e9c"      # purple: outside the company
 COLOR_CLEAN = "#adb5bd"         # grey:   untouched
 
 st.set_page_config(page_title="ChronoPath", page_icon="🕸️", layout="wide")
+
+# Page styling: the look of a plain academic website rather than an app. Serif
+# text (STIX Two, the typeface of many maths journals), a centred reading
+# column, thin rules instead of boxes, small-caps labels, and none of
+# Streamlit's own chrome. Colours come from .streamlit/config.toml. Only looks
+# change here -- if the font cannot load, the browser's serif is used.
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,600;1,400&family=Source+Code+Pro:wght@400;500&display=swap');
+
+html, body, [class*="st-"], .stMarkdown, .stText, button, input, select, textarea {
+    font-family: 'STIX Two Text', 'Latin Modern Roman', 'Times New Roman', serif;
+}
+/* Icons are drawn from a font of their own; the serif rule above must not
+   replace it, or the icon's name prints as text ("_arrow_right"). */
+[data-testid="stIconMaterial"], .material-symbols-rounded, .material-icons {
+    font-family: 'Material Symbols Rounded', 'Material Icons' !important;
+}
+code, pre, .stCode, [data-testid="stCode"] * {
+    font-family: 'Source Code Pro', ui-monospace, monospace !important;
+    font-size: 0.86em;
+}
+
+/* Streamlit chrome off: no coloured top strip, toolbar or footer. */
+header[data-testid="stHeader"] { background: transparent; height: 0; }
+[data-testid="stDecoration"], [data-testid="stToolbar"], footer { display: none; }
+
+/* A centred reading column, like a page of text. */
+[data-testid="stMainBlockContainer"], .block-container {
+    max-width: 1080px; padding-top: 1.2rem; padding-bottom: 3rem;
+}
+
+/* Masthead and footer. */
+.cp-masthead {
+    display: flex; justify-content: space-between; align-items: baseline;
+    flex-wrap: wrap; gap: .3rem 1.5rem;
+    border-bottom: 1px solid #1a1a1a; padding-bottom: .45rem; margin-bottom: .2rem;
+}
+.cp-masthead .cp-name { font-size: 1.9rem; font-weight: 600; letter-spacing: .01em; }
+.cp-masthead .cp-tag  { font-style: italic; color: #555; }
+.cp-subline {
+    font-size: .85rem; color: #666; font-variant: small-caps; letter-spacing: .05em;
+    border-bottom: 1px solid #ddd; padding-bottom: .4rem; margin-bottom: 1.4rem;
+}
+.cp-footer {
+    margin-top: 3rem; padding-top: .6rem; border-top: 1px solid #ccc;
+    font-size: .85rem; color: #777; text-align: center;
+}
+
+/* Headings: plain serif with a hairline under section titles. */
+h1, h2, h3, h4 { font-family: 'STIX Two Text', serif !important; font-weight: 600 !important; }
+h2, h3 { border-bottom: 1px solid #e3e3e3; padding-bottom: .25rem; }
+
+/* Metrics read as a row of figures, not cards. */
+[data-testid="stMetric"] { border-left: 2px solid #1f4e8c; padding: .1rem 0 .1rem .8rem; }
+[data-testid="stMetricLabel"] p {
+    font-variant: small-caps; letter-spacing: .05em; color: #555; font-size: .9rem;
+}
+[data-testid="stMetricValue"] { font-weight: 400; }
+
+/* Tabs as a text navigation bar with an underline on the current page. */
+.stTabs [data-baseweb="tab-list"] { gap: 1.4rem; border-bottom: 1px solid #ccc; }
+.stTabs button[data-baseweb="tab"] { padding: .35rem 0; background: transparent; }
+.stTabs button[data-baseweb="tab"] p { font-size: 1rem; }
+.stTabs [data-baseweb="tab-highlight"] { background-color: #1a1a1a; height: 2px; }
+
+/* Boxes become ruled sections. */
+[data-testid="stExpander"] details { border: none; border-top: 1px solid #ddd; border-radius: 0; }
+[data-testid="stAlert"] { border-radius: 0; }
+.stButton button { border-radius: 2px; }
+
+/* Plain tables, the way a paper sets them: rules above and below only. */
+[data-testid="stTable"] table { border-collapse: collapse; border-top: 1.5px solid #1a1a1a;
+    border-bottom: 1.5px solid #1a1a1a; }
+[data-testid="stTable"] th { border-bottom: 1px solid #1a1a1a !important; font-weight: 600; }
+[data-testid="stTable"] td, [data-testid="stTable"] th { border-left: none !important;
+    border-right: none !important; }
+
+/* The sidebar as a quiet margin column. */
+section[data-testid="stSidebar"] { border-right: 1px solid #e3e3e3; }
+section[data-testid="stSidebar"] h2 { border-bottom: none; font-size: 1.15rem; }
+</style>
+""", unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -568,8 +653,12 @@ def render_graph(incident):
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
-st.title("🕸️ ChronoPath")
-st.caption("Kill chain and attack path analysis — CyberForge 2026")
+st.markdown(
+    "<div class='cp-masthead'><span class='cp-name'>ChronoPath</span>"
+    "<span class='cp-tag'>Kill chain and attack path analysis</span></div>"
+    f"<div class='cp-subline'>CyberForge 2026 &nbsp;·&nbsp; "
+    f"data set: {html.escape(os.path.basename(DB_PATH))}</div>",
+    unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("Pipeline")
@@ -597,7 +686,7 @@ with st.sidebar:
                    else "data/sample.ndjson")
     log_file = st.text_input("Log file", value=default_log)
 
-    if st.button("▶ Run detection", width="stretch", type="primary"):
+    if st.button("Run detection", width="stretch", type="primary"):
         log_path = log_file if os.path.isabs(log_file) else \
             os.path.join(PROJECT_ROOT, log_file)
         if not os.path.exists(log_path):
@@ -710,7 +799,7 @@ if blocked:
         f"only an attempt (e.g. failed logins with no success).")
 estate = incidents[0].get("_estate_wide") or []
 if estate:
-    with st.expander(f"🌐 Estate-wide activity ({len(estate)} technique(s) "
+    with st.expander(f"Estate-wide activity ({len(estate)} technique(s) "
                      f"seen across most machines or accounts)"):
         st.dataframe([{
             "Technique": s["technique"], "Name": s["technique_name"],
@@ -723,11 +812,16 @@ st.divider()
 # Tab order follows the order an analyst actually works, which is why the 2.0
 # tabs are interleaved rather than appended: understand the incident, check the
 # evidence behind it, find out what is missing, decide what to do, then hunt.
-(tab_story, tab_timeline, tab_graph, tab_evidence, tab_blind, tab_respond,
- tab_next, tab_hunt, tab_sources) = st.tabs(
-    ["📝 Report", "🕐 Timeline", "🕸️ Attack graph", "🔗 Evidence",
-     "🕳️ What we can't see", "🚨 Respond now", "🎯 What's next",
-     "🔍 Threat hunting", "📡 Sources"])
+(tab_story, tab_investigator, tab_timeline, tab_graph, tab_evidence, tab_blind,
+ tab_respond, tab_next, tab_hunt, tab_sources) = st.tabs(
+    ["Report", "Investigator", "Timeline", "Attack graph", "Evidence",
+     "What we can't see", "Respond now", "What's next",
+     "Threat hunting", "Sources"])
+
+with tab_investigator:
+    # The Elliot reasoning layer: reads what ChronoPath established, questions
+    # it, and proposes what to check next. See src/elliot/.
+    elliot_ui.render(DB_PATH, incident)
 
 with tab_story:
     st.subheader("Incident report")
@@ -1319,3 +1413,9 @@ with tab_sources:
                     st.bar_chart(
                         [{"hour": str(v["hour_bucket"]), "events": v["events"]}
                          for v in vol], x="hour", y="events")
+
+# Site footer, last on the page.
+st.markdown(
+    "<div class='cp-footer'>ChronoPath &nbsp;·&nbsp; kill chain and attack path "
+    "analysis &nbsp;·&nbsp; CyberForge 2026</div>",
+    unsafe_allow_html=True)

@@ -35,8 +35,9 @@ SATISFIES
 import json
 import os
 import re
+from bisect import bisect_left
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import duckdb
 import networkx as nx
@@ -245,7 +246,7 @@ def load_events(db_path="chronopath.db"):
                    process, bytes_out, message, rule_name, mitre_technique,
                    mitre_name, kill_chain_stage, severity, event_count, outcome
             FROM suspicious_events
-            ORDER BY timestamp
+            ORDER BY timestamp, rowid
         """).fetchall()
         cols = [d[0] for d in con.description]
     except duckdb.Error:
@@ -348,6 +349,170 @@ def anchor_and_expand(events, window_minutes):
     return kept, links, summary
 
 
+_ANON_SQL = ("(\"user\" IS NULL OR trim(\"user\", ' \t\n\r\x0b\x0c') IN ("
+             + ", ".join("'" + v + "'" for v in sorted(_NON_IDENTITIES)) + "))")
+_EVENT_COLUMNS = ("timestamp, host, user, event_id, src_ip, dest_ip, status, "
+                  "process, bytes_out, message, rule_name, mitre_technique, "
+                  "mitre_name, kill_chain_stage, severity, event_count, outcome")
+
+
+def _first_within(entries, ts, window):
+    """
+    The first (time, index) entry within `window` seconds of `ts`, in list
+    order -- what anchor_and_expand's linear `next(...)` returns. The list is
+    in time order, so a binary search finds the same entry; an out-of-order
+    list (only possible with unparseable timestamps) falls back to the scan.
+    """
+    times = [t for t, _ in entries]
+    if ts != datetime.min and all(a <= b for a, b in zip(times, times[1:])):
+        lo = bisect_left(times, ts - timedelta(seconds=window))
+        if lo < len(entries) and abs((ts - entries[lo][0]).total_seconds()) <= window:
+            return entries[lo][1]
+        return None
+    return next((a for t, a in entries
+                 if abs((ts - t).total_seconds()) <= window), None)
+
+
+def load_correlation_input(db_path, window_minutes=CORRELATION_WINDOW_MINUTES):
+    """
+    anchor_and_expand() done mostly inside DuckDB, for large data sets.
+
+    Returns (events_to_correlate, context_links, estate_wide_summary) -- the
+    same as load_events() followed by anchor_and_expand() -- or None when the
+    split does not apply (no ambient technique), so the caller falls back.
+
+    WHY: on firex-30G.log there are 1.5 million detections and 99.7% of them
+    are ambient (IPS/AV/app-control noise on every machine). Loading all of
+    them as Python dicts took ~2 GB and 150 s, and pushed a 16 GB laptop into
+    swap. Only three things are needed in Python: the anchors, the ambient
+    detections that share an account or machine with an anchor (the only ones
+    that can attach as context), and per-technique totals for the estate-wide
+    table. DuckDB computes the prevalence and the totals and returns just the
+    rows that matter -- the matching itself is the same Python as before.
+    """
+    if not os.path.exists(db_path):
+        return None
+    con = duckdb.connect(db_path, read_only=True)
+    try:
+        try:
+            con.execute(f"""
+                CREATE TEMP TABLE _ev AS
+                SELECT mitre_technique AS t,
+                       NULLIF(host, '') AS h,
+                       CASE WHEN {_ANON_SQL} THEN NULL ELSE "user" END AS u
+                FROM suspicious_events""")
+        except duckdb.Error:
+            return None
+        # ambient_techniques(), as SQL: same thresholds, same dimensions.
+        ambient = set()
+        for col in ("h", "u"):
+            everyone = con.execute(
+                f"SELECT COUNT(DISTINCT {col}) FROM _ev").fetchone()[0]
+            if everyone < MIN_ENTITIES_FOR_PREVALENCE:
+                continue
+            for tech, n in con.execute(
+                    f"SELECT t, COUNT(DISTINCT {col}) FROM _ev "
+                    f"WHERE {col} IS NOT NULL GROUP BY t").fetchall():
+                if n / everyone > WIDESPREAD_SHARE:
+                    ambient.add(tech)
+        if not ambient:
+            return None
+        amb = sorted(t for t in ambient if t is not None)
+        in_amb = "list_contains(?::VARCHAR[], mitre_technique)"
+        if None in ambient:
+            in_amb = f"({in_amb} OR mitre_technique IS NULL)"
+
+        def rows(sql, params):
+            cur = con.execute(sql, params)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+        anchors = rows(f"SELECT rowid AS _rowid, {_EVENT_COLUMNS} FROM suspicious_events "
+                       f"WHERE NOT coalesce({in_amb}, false) ORDER BY timestamp, rowid",
+                       [amb])
+        users = sorted({e["user"] for e in anchors if not _is_anonymous(e)})
+        hosts = sorted({e["host"] for e in anchors if e.get("host")})
+        # Ambient rows that COULD attach: same account or same machine as an
+        # anchor. Everything else is unattached by definition.
+        could = (f"(NOT {_ANON_SQL} AND list_contains(?::VARCHAR[], \"user\")) "
+                 f"OR (host <> '' AND list_contains(?::VARCHAR[], host))")
+        candidates = rows(f"SELECT rowid AS _rowid, {_EVENT_COLUMNS} FROM suspicious_events "
+                          f"WHERE coalesce({in_amb}, false) AND coalesce({could}, false) "
+                          f"ORDER BY timestamp, rowid", [amb, users, hosts])
+        # Estate-wide totals for the ambient rows that cannot attach.
+        rest = rows(f"""
+            SELECT mitre_technique AS t,
+                   arg_min(mitre_name, timestamp) AS name, MIN(timestamp) AS first,
+                   list(DISTINCT host) FILTER (WHERE host <> '') AS hosts,
+                   list(DISTINCT "user") FILTER (WHERE NOT {_ANON_SQL}) AS users,
+                   COUNT(*) AS n,
+                   COUNT(*) FILTER (WHERE outcome = 'observed') AS allowed
+            FROM suspicious_events
+            WHERE coalesce({in_amb}, false) AND NOT coalesce({could}, false)
+            GROUP BY 1""", [amb, users, hosts])
+    finally:
+        con.close()
+
+    # The matching loop of anchor_and_expand(), unchanged in meaning.
+    by_user, by_host = defaultdict(list), defaultdict(list)
+    for i, e in enumerate(anchors):
+        ts = _parse_ts(e["timestamp"])
+        if not _is_anonymous(e):
+            by_user[e["user"]].append((ts, i))
+        if e.get("host"):
+            by_host[e["host"]].append((ts, i))
+    user_window = window_minutes * 60
+    host_window = HOST_CONTEXT_MINUTES * 60
+    attached, unattached = [], defaultdict(list)
+    for e in candidates:
+        ts = _parse_ts(e["timestamp"])
+        anchor, via = None, None
+        if not _is_anonymous(e):
+            anchor = _first_within(by_user.get(e["user"], ()), ts, user_window)
+            via = "account"
+        if anchor is None and e.get("host"):
+            anchor = _first_within(by_host.get(e["host"], ()), ts, host_window)
+            via = "host"
+        if anchor is None:
+            unattached[e["mitre_technique"]].append(e)
+        else:
+            e["context"] = via
+            attached.append((e, anchor))
+
+    # Anchors and attached context, merged back into one list in the order
+    # load_events() gives: timestamp, then insertion order. Ties matter -- the
+    # risk score's progression term reads events in this order.
+    merged = [(a.pop("_rowid"), 0, n, a) for n, a in enumerate(anchors)]
+    merged += [(e.pop("_rowid"), 1, n, e) for n, (e, _) in enumerate(attached)]
+    merged.sort(key=lambda m: (str(m[3]["timestamp"]), m[0]))
+    kept = [m[3] for m in merged]
+    pos_anchor = {m[2]: p for p, m in enumerate(merged) if m[1] == 0}
+    pos_attached = {m[2]: p for p, m in enumerate(merged) if m[1] == 1}
+    links = [(pos_attached[n], pos_anchor[a]) for n, (_, a) in enumerate(attached)]
+
+    # Estate-wide summary: SQL totals plus the candidates that did not attach.
+    summary = {}
+    for r in rest:
+        summary[r["t"]] = {"name": r["name"], "first": str(r["first"]),
+                           "hosts": set(r["hosts"] or []), "users": set(r["users"] or []),
+                           "n": r["n"], "allowed": r["allowed"]}
+    for tech, evs in unattached.items():
+        s = summary.setdefault(tech, {"name": evs[0]["mitre_name"],
+                                      "first": str(evs[0]["timestamp"]),
+                                      "hosts": set(), "users": set(), "n": 0, "allowed": 0})
+        if str(evs[0]["timestamp"]) < s["first"]:
+            s["name"], s["first"] = evs[0]["mitre_name"], str(evs[0]["timestamp"])
+        s["hosts"] |= {e["host"] for e in evs if e.get("host")}
+        s["users"] |= {e["user"] for e in evs if not _is_anonymous(e)}
+        s["n"] += len(evs)
+        s["allowed"] += sum(1 for e in evs if e.get("outcome") == "observed")
+    estate = [{"technique": t, "technique_name": s["name"], "hosts": len(s["hosts"]),
+               "accounts": len(s["users"]), "detections": s["n"], "allowed": s["allowed"]}
+              for t, s in sorted(summary.items(), key=lambda kv: kv[1]["first"])]
+    estate.sort(key=lambda s: (-s["allowed"], -s["detections"]))
+    return kept, links, estate
+
+
 def correlate_incidents(events, window_minutes=CORRELATION_WINDOW_MINUTES):
     """
     Group events into incidents -- the heart of FR-4.
@@ -368,6 +533,15 @@ def correlate_incidents(events, window_minutes=CORRELATION_WINDOW_MINUTES):
     other -- is quadratic and needless.
     """
     events, context_links, estate_wide = anchor_and_expand(events, window_minutes)
+    return _union_and_rank(events, context_links, estate_wide, window_minutes)
+
+
+def _union_and_rank(events, context_links, estate_wide, window_minutes):
+    """
+    The grouping and triage half of correlate_incidents(), on events that have
+    already been through anchor-and-expand -- in memory, or in SQL by
+    load_correlation_input().
+    """
     parent = list(range(len(events)))
 
     def find(i):
@@ -962,6 +1136,10 @@ def summarise_for_llm(incident, links=None):
 
 def analyse(db_path="chronopath.db"):
     """Full pipeline: load detections, correlate, return ranked incidents."""
+    prepared = load_correlation_input(db_path)
+    if prepared is not None:
+        events, links, estate = prepared
+        return _union_and_rank(events, links, estate, CORRELATION_WINDOW_MINUTES)
     events = load_events(db_path)
     if not events:
         return []
