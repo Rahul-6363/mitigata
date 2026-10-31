@@ -57,7 +57,98 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import graph_engine  # noqa: E402
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = os.path.join(PROJECT_ROOT, "chronopath.db")
+def _pick_database():
+    """
+    Choose which database to serve.
+
+    Same reasoning as the dashboard: each input gets its own database, so
+    hardcoding chronopath.db meant the API served the small flat sample while
+    the real findings sat in firex.db. Honour CHRONOPATH_DB if set, else serve
+    the most recently written database -- the one just produced.
+    """
+    override = os.environ.get("CHRONOPATH_DB")
+    if override:
+        path = override if os.path.isabs(override) else \
+            os.path.join(PROJECT_ROOT, override)
+        if os.path.exists(path):
+            return path
+    candidates = [os.path.join(PROJECT_ROOT, name) for name in
+                  ("firex.db", "edr.db", "chronopath.db")]
+    existing = [p for p in candidates if os.path.exists(p)]
+    if not existing:
+        return os.path.join(PROJECT_ROOT, "chronopath.db")
+    return max(existing, key=os.path.getmtime)
+
+
+DB_PATH = _pick_database()
+
+
+# ---------------------------------------------------------------------------
+# ChronoPath 2.0 -- serving the evidence and gap layer
+#
+# Read-only queries against the cp2_ tables. These are small -- links, gaps and
+# indicators number in the dozens, not the millions -- so they run in under a
+# millisecond and need no cache of their own, unlike correlation.
+#
+# Every reader returns an empty result when its table is absent, so the API
+# still answers on a 1.x database rather than erroring. An endpoint that 500s
+# because an optional layer was never built is worse than one that honestly
+# returns nothing.
+# ---------------------------------------------------------------------------
+def _cp2_query(sql, params=None):
+    """Run one read-only query against the 2.0 tables."""
+    import duckdb
+
+    if not os.path.exists(DB_PATH):
+        return []
+    try:
+        con = duckdb.connect(DB_PATH, read_only=True)
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        rows = con.execute(sql, params or []).fetchall()
+        cols = [d[0] for d in con.description]
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        con.close()
+
+
+def _incident_id(raw):
+    """
+    Normalise an incident id from a URL into the canonical `INC-01` form.
+
+    The cp2_ tables store the canonical id, but a judge typing a URL by hand
+    writes `/gaps/1`, not `/gaps/INC-01` -- the PRD's own example uses a bare
+    number. Rather than duplicate find_incident's tolerance, this resolves
+    against the live incident list, so any form that works for /incidents also
+    works for the 2.0 routes. Falls back to the raw value upper-cased, which
+    simply matches nothing and returns an empty result.
+    """
+    incidents = get_incidents()
+    found = find_incident(incidents, raw)
+    if found:
+        return found["id"]
+    return str(raw).strip().upper()
+
+
+def _json_safe(rows):
+    """
+    Make DuckDB rows JSON-serialisable.
+
+    Timestamps come back as datetime objects, which json.dumps refuses. Casting
+    to string here rather than in each endpoint keeps the conversion in one
+    place, where it cannot be forgotten on a new route.
+    """
+    out = []
+    for row in rows:
+        clean = {}
+        for k, v in row.items():
+            clean[k] = v if v is None or isinstance(
+                v, (str, int, float, bool)) else str(v)
+        out.append(clean)
+    return out
 
 # Correlated incidents, cached in memory. _cache_key is the database's
 # modification time, so writing a new chronopath.db invalidates the cache
@@ -265,7 +356,25 @@ class Handler(BaseHTTPRequestHandler):
                         "GET /stats": "corpus summary",
                         "GET /metrics": "endpoint timings",
                     },
+                    "endpoints_2_0": {
+                        "GET /evidence[/{id}]": (
+                            "why each pair of events was linked, graded, plus "
+                            "the links that were refused"),
+                        "GET /gaps[/{id}]": (
+                            "what the data cannot show, with basis, impact "
+                            "and the evidence to request"),
+                        "GET /separation": (
+                            "for every pair of incidents, why they are not "
+                            "one incident"),
+                        "GET /indicators[/{id}]": (
+                            "indicators with first/last seen across the whole "
+                            "data set -- is it still happening?"),
+                        "GET /sources": (
+                            "provenance: SHA-256, format, time range, row "
+                            "counts, clock check, per-stream coverage"),
+                    },
                     "example": "/incidents/1/path",
+                    "example_2_0": "/gaps/1",
                 }, started=started)
 
             # GET /pivot -- threat-hunting view: which entities look odd,
@@ -287,6 +396,126 @@ class Handler(BaseHTTPRequestHandler):
                     "bucket_count": len(buckets),
                     "busiest": busiest,
                     "timeline": buckets,
+                }, started=started)
+
+            # --- ChronoPath 2.0 endpoints ---------------------------------
+            #
+            # GET /evidence           every graded link, plus the refused ones
+            # GET /evidence/{id}      one incident's links
+            # GET /gaps               the whole gap ledger
+            # GET /gaps/{id}          one incident's gaps
+            # GET /separation         why the incidents are separate
+            # GET /indicators[/{id}]  indicators with estate-wide first/last
+            # GET /sources            provenance and per-stream coverage
+
+            if parts[0] == "evidence":
+                where, params_ = "", []
+                if len(parts) > 1:
+                    where = "WHERE incident_id = ?"
+                    params_ = [_incident_id(parts[1])]
+                links = _json_safe(_cp2_query(
+                    f"SELECT * FROM cp2_links {where} ORDER BY incident_id, "
+                    f"CASE grade WHEN 'HARD' THEN 1 WHEN 'SOFT' THEN 2 "
+                    f"WHEN 'INFERRED' THEN 3 ELSE 4 END", params_))
+                rejected = _json_safe(_cp2_query(
+                    f"SELECT * FROM cp2_rejected_links {where}", params_))
+                grades = {}
+                for link in links:
+                    grades[link["grade"]] = grades.get(link["grade"], 0) + 1
+                return self._send({
+                    "description": (
+                        "Why each pair of events was linked, with a grade for "
+                        "how good that evidence is. HARD = same account or an "
+                        "identity pivot; SOFT = shared external address or "
+                        "machine; INFERRED = machine-only context; "
+                        "UNRESOLVED = a candidate link that was rejected."),
+                    "link_count": len(links),
+                    "by_grade": grades,
+                    "links": links,
+                    "rejected_note": (
+                        "Candidate links the engine refused -- shared "
+                        "infrastructure or placeholder values. Recorded so the "
+                        "refusal is visible rather than silent."),
+                    "rejected": rejected,
+                }, started=started)
+
+            if parts[0] == "gaps":
+                where, params_ = "", []
+                if len(parts) > 1:
+                    where = "WHERE incident_id = ?"
+                    params_ = [_incident_id(parts[1])]
+                rows = _json_safe(_cp2_query(
+                    f"SELECT * FROM cp2_gaps {where} "
+                    f"ORDER BY incident_id, classification, gap_id", params_))
+                by_class = {}
+                for row in rows:
+                    by_class[row["classification"]] = \
+                        by_class.get(row["classification"], 0) + 1
+                return self._send({
+                    "description": (
+                        "What the supplied data cannot show, each with the "
+                        "facts establishing it, what it prevents concluding, "
+                        "and the evidence that would close it."),
+                    "ground_rule": (
+                        "Missing is not malicious. Absence is classified "
+                        "NOT_COLLECTED or COVERAGE_UNKNOWN, never as "
+                        "deletion, unless a positive event proves otherwise."),
+                    "gap_count": len(rows),
+                    "by_classification": by_class,
+                    "gaps": rows,
+                }, started=started)
+
+            if parts[0] == "separation":
+                rows = _json_safe(_cp2_query(
+                    "SELECT * FROM cp2_incident_separation "
+                    "ORDER BY incident_a, incident_b"))
+                return self._send({
+                    "description": (
+                        "Reporting several incidents is itself a claim. For "
+                        "every pair, what was compared and what was found."),
+                    "pair_count": len(rows),
+                    "pairs": rows,
+                }, started=started)
+
+            if parts[0] == "indicators":
+                where, params_ = "", []
+                if len(parts) > 1:
+                    where = "WHERE incident_id = ?"
+                    params_ = [_incident_id(parts[1])]
+                rows = _json_safe(_cp2_query(
+                    f"SELECT * FROM cp2_indicators {where} "
+                    f"ORDER BY incident_id, indicator_type, value", params_))
+                still = [r for r in rows
+                         if (r.get("note") or "").startswith("STILL ACTIVE")]
+                return self._send({
+                    "description": (
+                        "Indicators with first and last seen across the WHOLE "
+                        "data set, not just inside the incident -- which is "
+                        "what answers 'is it still happening?'"),
+                    "indicator_count": len(rows),
+                    "still_active_count": len(still),
+                    "indicators": rows,
+                }, started=started)
+
+            if parts[0] == "sources":
+                fps = _json_safe(_cp2_query(
+                    "SELECT * FROM cp2_source_fingerprint ORDER BY recorded_at"))
+                streams = _json_safe(_cp2_query(
+                    "SELECT source, stream, SUM(event_count) AS events, "
+                    "MIN(hour_bucket) AS first_hour, "
+                    "MAX(hour_bucket) AS last_hour, "
+                    "COUNT(*) AS active_hours "
+                    "FROM cp2_stream_volume GROUP BY 1, 2 "
+                    "ORDER BY source, events DESC"))
+                return self._send({
+                    "description": (
+                        "Provenance and coverage for every input: SHA-256, "
+                        "detected format, time range, row counts, which "
+                        "timestamp field was used, and the per-stream "
+                        "breakdown."),
+                    "source_count": len(fps),
+                    "sources": fps,
+                    "streams": streams,
                 }, started=started)
 
             if parts[0] == "stats":
