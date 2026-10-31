@@ -280,33 +280,53 @@ def build_stream_volume(con, source_expr, source_name, log_format):
             || '/' ||
             CASE WHEN fg_subtype = '' THEN 'unknown' ELSE fg_subtype END
         """
+    elif log_format == "applog":
+        # Each line names the application component that wrote it ([auth],
+        # [iam], [data] ...), which is a real subsystem with its own coverage.
+        stream_sql = """
+            CASE WHEN app_component = '' THEN 'unknown' ELSE app_component END
+        """
     else:
-        # The other two formats carry no equivalent subsystem field. Rather
+        # ECS and flat JSON carry no equivalent subsystem field. Rather
         # than invent one, every row is one stream named for the format. That
         # is honest: for ECS and flat JSON we genuinely cannot break coverage
         # down further, and pretending otherwise would be fabricated detail.
         stream_sql = f"'{log_format}'"
 
+    # The exact first and last timestamps are gathered in the same scan, into a
+    # small per-(stream, hour) temp table. Reading them off `hour_bucket`
+    # instead reported a file that starts at 08:48:36 as starting at 08:00:00.
     con.execute("DELETE FROM cp2_stream_volume WHERE source = ?", [source_name])
     con.execute(f"""
-        INSERT INTO cp2_stream_volume
-        SELECT ? AS source,
-               {stream_sql} AS stream,
+        CREATE OR REPLACE TEMP TABLE _cp2_volume_scan AS
+        SELECT {stream_sql} AS stream,
                date_trunc('hour', TRY_CAST(timestamp AS TIMESTAMP)) AS hour_bucket,
-               COUNT(*) AS event_count
+               COUNT(*) AS event_count,
+               MIN(TRY_CAST(timestamp AS TIMESTAMP)) AS first_ts,
+               MAX(TRY_CAST(timestamp AS TIMESTAMP)) AS last_ts
         FROM {source_expr}
         WHERE TRY_CAST(timestamp AS TIMESTAMP) IS NOT NULL
-        GROUP BY 1, 2, 3
+        GROUP BY 1, 2
+    """)
+    con.execute("""
+        INSERT INTO cp2_stream_volume
+        SELECT ?, stream, hour_bucket, event_count FROM _cp2_volume_scan
     """, [source_name])
+    exact = con.execute(
+        "SELECT MIN(first_ts), MAX(last_ts) FROM _cp2_volume_scan").fetchone()
+    con.execute("DROP TABLE _cp2_volume_scan")
 
-    return con.execute(
+    summary = con.execute(
         "SELECT COUNT(*), COUNT(DISTINCT stream), MIN(hour_bucket), "
         "MAX(hour_bucket), SUM(event_count) "
         "FROM cp2_stream_volume WHERE source = ?", [source_name]).fetchone()
+    # Indexes 0-4 are unchanged for existing callers; 5-6 are the exact range.
+    return tuple(summary) + tuple(exact)
 
 
 def build_fingerprint(con, log_path, source_name, log_format,
-                      total_rows=None, parsed_rows=None, rejected_rows=None):
+                      total_rows=None, parsed_rows=None, rejected_rows=None,
+                      exact_range=None):
     """
     Record provenance for one input file.
 
@@ -326,13 +346,17 @@ def build_fingerprint(con, log_path, source_name, log_format,
         probe = {"streams": {}, "probed_lines": 0, "probe_parsed_ts": 0,
                  "probe_bad_ts": 0, "timezones": [], "eventtime_present": 0,
                  "clock_agree_utc": 0, "clock_disagree_utc": 0}
-        ts_field = ("@timestamp (ECS, ISO-8601)" if log_format == "ecs"
-                    else "timestamp (ISO-8601)")
+        ts_field = {"ecs": "@timestamp (ECS, ISO-8601)",
+                    "applog": "leading date + time (application log)"}.get(
+                        log_format, "timestamp (ISO-8601)")
 
     rng = con.execute(
         "SELECT MIN(hour_bucket), MAX(hour_bucket), SUM(event_count) "
         "FROM cp2_stream_volume WHERE source = ?", [source_name]).fetchone()
     earliest, latest, volume_rows = rng if rng else (None, None, None)
+    # Prefer the exact first/last event over the hour buckets when known.
+    if exact_range and exact_range[0] is not None:
+        earliest, latest = exact_range
 
     if total_rows is None:
         total_rows = int(volume_rows or 0)
@@ -384,7 +408,8 @@ def record_source(con, log_path, source_name, log_format, source_expr,
     _ensure_tables(con)
     vol = build_stream_volume(con, source_expr, source_name, log_format)
     fp = build_fingerprint(con, log_path, source_name, log_format,
-                           total_rows=total_rows, parsed_rows=parsed_rows)
+                           total_rows=total_rows, parsed_rows=parsed_rows,
+                           exact_range=vol[5:7] if vol else None)
     fp["volume_rows"] = vol[0] if vol else 0
     return fp
 

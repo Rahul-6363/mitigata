@@ -271,6 +271,11 @@ def _created_and_deleted(events):
             created.add(m.group(1).strip('"'))
         for m in re.finditer(r"\bdelete\s+system\.admin\s+(\S+)", text, re.I):
             deleted.add(m.group(1).strip('"'))
+        # Application-log shape: `... account created: <name>`.
+        for m in re.finditer(r"\baccount created:\s*(\S+)", text, re.I):
+            created.add(m.group(1).strip('"'))
+        for m in re.finditer(r"\baccount deleted:\s*(\S+)", text, re.I):
+            deleted.add(m.group(1).strip('"'))
         # Windows / EDR shape, via the engine's own parser.
         try:
             import graph_engine
@@ -488,8 +493,8 @@ def suggested_actions(incident, gap_rows=None):
              f"between its creation and deletion -- the account is gone, so "
              f"the current config will look clean.",
              "Check specifically for persistence that outlives the account: "
-             "new VPN users, added firewall policies, port forwards, "
-             "additional admin accounts, modified trusted hosts.",
+             "additional admin accounts, new roles or API keys, VPN users, "
+             "firewall policies, port forwards, modified trusted hosts.",
              "Compare the running configuration against the last known-good "
              "backup, rather than reviewing it on its own.",
              "Preserve the configuration revision history before it rotates."],
@@ -519,15 +524,30 @@ def suggested_actions(incident, gap_rows=None):
 
     # Logging or policy interference.
     if any(t.startswith("T1562") for t in techniques) or "logging disabled" in text:
-        add("A defensive control was interfered with (logging disabled and/or "
-            "policy objects purged).",
+        add("A defensive control was interfered with (logging, alerting or "
+            "policy disabled or purged).",
             ["Re-enable logging and confirm it is forwarding off-box, so the "
              "next attempt cannot blind the local copy.",
              "Diff the current configuration against the last backup to "
              "establish exactly what the purge removed.",
-             "Retrieve the FortiAnalyzer or remote syslog copy for the window "
-             "to corroborate what the on-box log holds.",
-             "Restore any firewall policies that were removed."],
+             "Retrieve the off-box copy (SIEM, FortiAnalyzer or remote "
+             "syslog) for the window to corroborate what the local log holds.",
+             "Restore any alerting rules or policies that were disabled or "
+             "removed."],
+            "immediate")
+
+    # Bulk collection of data -- the likely objective of the intrusion.
+    if {"T1213", "T1005", "T1530"} & techniques:
+        moved = sum(int(e.get("bytes_out") or 0) for e in events
+                    if str(e.get("mitre_technique") or "") in
+                    ("T1213", "T1005", "T1530"))
+        size = f" ({moved / 1048576:,.0f} MB)" if moved else ""
+        add(f"Data was collected in bulk from an information store{size}.",
+            ["Treat the exported data as compromised and identify exactly "
+             "which records it contained.",
+             "Check egress logs for where the export was sent after it was "
+             "produced.",
+             "Assess breach-notification obligations for the data involved."],
             "immediate")
 
     # VPN access from two countries -- impossible travel.

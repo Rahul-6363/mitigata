@@ -180,7 +180,59 @@ def _telemetry_present(sources):
         present |= {"network_flow", "firewall_event", "utm_detection"}
     if "ecs" in formats or "flat" in formats:
         present |= {"endpoint_process", "endpoint_auth"}
+    if "applog" in formats:
+        # An application's own log sees its sign-ins and the actions taken in
+        # it. It does not see the client machine or a directory service.
+        present |= {"application_auth", "application_audit"}
     return present
+
+
+# How the gap text names the evidence, per source format. The wording used to
+# assume a firewall everywhere, which told an analyst reading application logs
+# that "the firewall accepted" a login it never saw.
+_SOURCE_TERMS = {
+    "fortigate": {
+        "telemetry": "firewall telemetry",
+        "recorder": "the firewall",
+        "acted_on": "administered the firewall from",
+        "lifecycle_limit": ("FortiGate event logs state only that a "
+                            "configuration attribute changed, never what the "
+                            "new value was"),
+        "config_history": "Firewall configuration revision history",
+        "persistence": ("firewall policies, VPN users, administrative "
+                        "accounts or port forwards"),
+    },
+    "applog": {
+        "telemetry": "application logs",
+        "recorder": "the application",
+        "acted_on": "used to reach the application",
+        "lifecycle_limit": ("the application log records one line per action "
+                            "(what was done and to what), never the full "
+                            "state before and after"),
+        "config_history": "Application configuration and permission history",
+        "persistence": ("roles, API keys, scheduled jobs, alerting rules or "
+                        "further accounts"),
+    },
+    "endpoint": {
+        "telemetry": "endpoint telemetry",
+        "recorder": "the endpoint",
+        "acted_on": "worked from",
+        "lifecycle_limit": ("the endpoint logs record that the account was "
+                            "created and deleted, not the directory changes "
+                            "made with it"),
+        "config_history": "Directory change audit",
+        "persistence": ("group memberships, scheduled tasks, services or "
+                        "further accounts"),
+    },
+}
+
+
+def _source_terms(sources):
+    formats = {s["format"] for s in sources}
+    for fmt in ("fortigate", "applog"):
+        if fmt in formats:
+            return _SOURCE_TERMS[fmt]
+    return _SOURCE_TERMS["endpoint"]
 
 
 def _fmt_window(start, end):
@@ -325,6 +377,7 @@ def incident_gaps(con, incident, sources=None):
 
     sources = sources if sources is not None else _sources(con)
     present = _telemetry_present(sources)
+    terms = _source_terms(sources)
     events = incident.get("events") or []
     if not events:
         return []
@@ -350,18 +403,18 @@ def incident_gaps(con, incident, sources=None):
             "time_start": start, "time_end": end,
             "classification": "NOT_COLLECTED",
             "basis": (
-                f"This incident is built entirely from firewall telemetry. No "
-                f"supplied source contains endpoint process execution for the "
-                f"workstation(s) that {who} administered the firewall from, so "
-                f"we see the firewall side of each action and nothing of the "
-                f"machine that initiated it."
+                f"This incident is built entirely from {terms['telemetry']}. "
+                f"No supplied source contains endpoint process execution for "
+                f"the workstation(s) that {who} {terms['acted_on']}, so we "
+                f"see {terms['recorder']}'s side of each action and nothing "
+                f"of the machine that initiated it."
             ),
             "impact": (
                 "Cannot establish whether these were deliberate actions by the "
-                "named administrator, an attacker using stolen credentials, or "
-                "malware driving an authenticated session. The firewall records "
-                "the authenticated identity, which is not the same as the "
-                "person."
+                "named account holder, an attacker using stolen credentials, "
+                f"or malware driving an authenticated session. "
+                f"{terms['recorder'].capitalize()} records the authenticated "
+                f"identity, which is not the same as the person."
             ),
             "evidence_request": EVIDENCE_REQUESTS["endpoint_process"].format(
                 entity=who, window=window),
@@ -370,21 +423,35 @@ def incident_gaps(con, incident, sources=None):
     # 2. The account-lifecycle gap. Only raised when the data actually shows a
     #    creation or deletion -- it is grounded in an event, not in suspicion.
     lifecycle = [e for e in events
-                 if re.search(r"\b(add|delete)\s+system\.admin\b",
+                 if re.search(r"\b(add|delete)\s+system\.admin\b"
+                              r"|\baccount (created|deleted):",
                               f"{e.get('raw_msg') or ''} {e.get('message') or ''}",
                               re.IGNORECASE)
                  or str(e.get("mitre_technique") or "").startswith(("T1136", "T1098"))]
     if lifecycle and "config_audit" not in present:
         named = set()
         for e in lifecycle:
-            m = re.search(r"system\.admin\s+(\S+)",
+            # FortiGate: `Add system.admin <name>`.
+            # Application log: `... account created: <name>`.
+            m = re.search(r"system\.admin\s+(\S+)"
+                          r"|account (?:created|deleted):\s*(\S+)",
                           f"{e.get('raw_msg') or ''} {e.get('message') or ''}",
                           re.IGNORECASE)
             if m:
-                named.add(m.group(1).strip('"'))
+                named.add((m.group(1) or m.group(2)).strip('"'))
         subject = ", ".join(sorted(named)) if named else ", ".join(accounts[:2])
         first = min(e["timestamp"] for e in lifecycle)
         last = max(e["timestamp"] for e in lifecycle)
+        # Name only the stages the data shows. temp_root in sample1.log is
+        # created and deleted but never logs in; saying "its login" was false.
+        stages = ["its creation"]
+        if named & {str(e.get("user") or "").strip() for e in events}:
+            stages.append("its use")
+        if any(str(e.get("mitre_technique") or "").startswith("T1070")
+               for e in events):
+            stages.append("its deletion")
+        recorded = (", ".join(stages[:-1]) + " and " + stages[-1]
+                    if len(stages) > 1 else stages[0])
         out.append({
             "gap_id": f"{inc_id}-GAP-LIFECYCLE",
             "incident_id": inc_id,
@@ -394,22 +461,21 @@ def incident_gaps(con, incident, sources=None):
             "classification": "NOT_COLLECTED",
             "basis": (
                 f"The data records the lifecycle of the administrative account "
-                f"{subject} -- its creation, its login and its deletion -- but "
-                f"FortiGate event logs state only that a configuration "
-                f"attribute changed, never what the new value was. No "
-                f"configuration revision history or diff was supplied for "
-                f"{first} to {last}."
+                f"{subject} -- {recorded} -- but "
+                f"{terms['lifecycle_limit']}. No configuration revision "
+                f"history or diff was supplied for {first} to {last}."
             ),
             "impact": (
-                f"Cannot determine what {subject} actually did while it "
-                f"existed. Specifically: no answer on whether firewall "
-                f"policies, VPN users, administrative accounts or port "
-                f"forwards were added that would survive the account's "
-                f"deletion. Treat persistence as unverified rather than "
-                f"absent."
+                f"Cannot determine everything {subject} did while it "
+                f"existed. Specifically: no answer on whether "
+                f"{terms['persistence']} were added that would survive the "
+                f"account's deletion. Treat persistence as unverified rather "
+                f"than absent."
             ),
             "evidence_request": EVIDENCE_REQUESTS["account_lifecycle"].format(
-                entity=subject),
+                entity=subject).replace(
+                    "Firewall configuration revision history",
+                    terms["config_history"]),
         })
 
     # 3. AN ACTOR WITH NO ORIGIN IN SCOPE.
@@ -500,17 +566,17 @@ def incident_gaps(con, incident, sources=None):
             "classification": "NOT_COLLECTED",
             "basis": (
                 f"{len(external_auth)} authentication event(s) in this "
-                f"incident were accepted by the firewall for {who}. No "
+                f"incident were accepted by {terms['recorder']} for {who}. No "
                 f"identity-provider or directory audit log was supplied, so "
-                f"the firewall's own record is the only account of the "
+                f"{terms['recorder']}'s own record is the only account of the "
                 f"authentication."
             ),
             "impact": (
                 "Cannot tell whether MFA was satisfied, bypassed or not "
                 "configured, and cannot see whether the same credentials were "
                 "used successfully against other systems in the estate. A "
-                "successful firewall login is not proof that only the "
-                "firewall was reached."
+                f"successful login to {terms['recorder']} is not proof that "
+                f"only {terms['recorder']} was reached."
             ),
             "evidence_request": EVIDENCE_REQUESTS["identity_provider"].format(
                 entity=who, window=window),

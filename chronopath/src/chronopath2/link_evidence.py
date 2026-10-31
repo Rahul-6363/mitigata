@@ -680,9 +680,14 @@ def fetch_raw_lines(log_path, incident, max_lines=MAX_RAW_LINES):
                 if len(found) >= max_lines:
                     break
                 for date_part, time_part, user in wanted:
-                    if (f"date={date_part}" in line
-                            and f"time={time_part}" in line
-                            and (not user or f'user="{user}"' in line)):
+                    # FortiGate: date=.. time=.. user="..";
+                    # application log: "<date> <time> ... user=..".
+                    fortigate = (f"date={date_part}" in line
+                                 and f"time={time_part}" in line
+                                 and (not user or f'user="{user}"' in line))
+                    applog = (line.startswith(f"{date_part} {time_part} ")
+                              and (not user or f" user={user} " in line))
+                    if fortigate or applog:
                         found.append(line.strip())
                         break
     except OSError:

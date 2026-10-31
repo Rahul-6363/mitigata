@@ -55,18 +55,38 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # recently written database that actually holds detections. "Most recent" is
 # the right default because it is the one the analyst just produced.
 DB_ENV_VAR = "CHRONOPATH_DB"
-KNOWN_DBS = ("firex.db", "edr.db", "chronopath.db", "edr_removed.db")
+
+
+def _available_databases():
+    """
+    Every ChronoPath database in the project folder.
+
+    Discovered rather than listed: a fixed list of four names meant a database
+    built for any other log (sample1.db, firex30.db) could only be opened via
+    the environment variable, and the sidebar's Run detection wrote somewhere
+    the page was not looking.
+    """
+    found = []
+    for name in sorted(os.listdir(PROJECT_ROOT)):
+        if name.endswith(".db"):
+            found.append(os.path.join(PROJECT_ROOT, name))
+    return found
 
 
 def _pick_database():
+    # 1. A choice made in the sidebar, or the database Run detection just built.
+    chosen = st.session_state.get("db_path")
+    if chosen and os.path.exists(chosen):
+        return chosen
+    # 2. An explicit CHRONOPATH_DB.
     override = os.environ.get(DB_ENV_VAR)
     if override:
         path = override if os.path.isabs(override) else \
             os.path.join(PROJECT_ROOT, override)
         if os.path.exists(path):
             return path
-    candidates = [os.path.join(PROJECT_ROOT, name) for name in KNOWN_DBS]
-    existing = [p for p in candidates if os.path.exists(p)]
+    # 3. The most recently written database.
+    existing = _available_databases()
     if not existing:
         return os.path.join(PROJECT_ROOT, "chronopath.db")
     return max(existing, key=os.path.getmtime)
@@ -150,7 +170,16 @@ def load_incidents(db_mtime):
 
 
 def db_signature():
-    return os.path.getmtime(DB_PATH) if os.path.exists(DB_PATH) else 0
+    # Path as well as mtime: two databases written in the same second must not
+    # share cached results when the analyst switches between them.
+    return (DB_PATH, os.path.getmtime(DB_PATH) if os.path.exists(DB_PATH) else 0)
+
+
+def source_log_for_db(sig):
+    """The log file this database was built from, if the coverage pass ran."""
+    rows = cp2_read(sig, "SELECT path FROM cp2_source_fingerprint "
+                         "ORDER BY recorded_at DESC LIMIT 1")
+    return rows[0]["path"] if rows else None
 
 
 # ---------------------------------------------------------------------------
@@ -187,13 +216,59 @@ def cp2_has_data(db_mtime):
                 or cp2_read(db_mtime, "SELECT 1 FROM cp2_gaps LIMIT 1"))
 
 
-def cp2_missing_notice():
+def guess_source_log():
+    """
+    The log this database was built from: the coverage record if there is one,
+    otherwise a log file with the same name as the database (sample1.db ->
+    sample1.log), which is how Run detection names databases.
+    """
+    recorded = source_log_for_db(db_signature())
+    if recorded and os.path.exists(recorded):
+        return recorded
+    stem = os.path.splitext(os.path.basename(DB_PATH))[0]
+    for folder in (PROJECT_ROOT, os.path.join(PROJECT_ROOT, "data")):
+        if not os.path.isdir(folder):
+            continue
+        for name in sorted(os.listdir(folder)):
+            base, ext = os.path.splitext(name)
+            if base == stem and ext.lower() not in (".db", ".wal"):
+                return os.path.join(folder, name)
+    return None
+
+
+def build_cp2_now(key):
+    """
+    One-click repair for a database without the 2.0 layer -- for example one
+    the parser rebuilt on its own, which deletes the file and the layer with it.
+    """
+    source = guess_source_log()
+    if not source:
+        return
+    rel = os.path.relpath(source, PROJECT_ROOT)
+    if st.button(f"Build it now from {rel}", key=key, type="primary"):
+        with st.spinner("Building the evidence, gap and coverage layer..."):
+            result = subprocess.run(
+                [sys.executable,
+                 os.path.join(PROJECT_ROOT, "scripts", "run_cp2.py"),
+                 "--db", DB_PATH, "--input", source],
+                capture_output=True, text=True, cwd=PROJECT_ROOT,
+                encoding="utf-8", errors="replace",
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        if result.returncode == 0:
+            st.cache_data.clear()
+            st.rerun()
+        st.error("Building the 2.0 layer failed")
+        st.code((result.stdout + result.stderr)[-1500:], language="text")
+
+
+def cp2_missing_notice(key="cp2_build"):
     """One consistent message wherever the 2.0 layer has not been built."""
     st.info(
         "The ChronoPath 2.0 evidence layer has not been built for this "
         "database yet. Run:\n\n"
         f"```\npython scripts/run_cp2.py --db {os.path.basename(DB_PATH)} "
         "--input <your log file>\n```")
+    build_cp2_now(key)
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +558,7 @@ def render_graph(incident):
         show_context = st.toggle("Show other accounts' alerts on the same machines",
                                  value=False, key=f"ctx_{incident['id']}")
     dot, hidden = build_attack_dot(incident, show_context)
-    st.graphviz_chart(dot, use_container_width=True)
+    st.graphviz_chart(dot, width="stretch")
     if hidden:
         st.caption(f"{hidden} alert(s) hidden: other accounts active on the same "
                    f"machine within {graph_engine.HOST_CONTEXT_MINUTES} minutes. "
@@ -499,25 +574,78 @@ st.caption("Kill chain and attack path analysis — CyberForge 2026")
 with st.sidebar:
     st.header("Pipeline")
 
-    log_file = st.text_input("Log file", value="data/sample.ndjson")
+    # Which database the page shows. Listed from the folder, so whatever was
+    # built -- here or on the command line -- can be opened.
+    dbs = _available_databases()
+    if dbs:
+        names = [os.path.basename(p) for p in dbs]
+        current = os.path.basename(DB_PATH)
+        picked = st.selectbox(
+            "Database", names,
+            index=names.index(current) if current in names else 0,
+            help="Each log file gets its own database. Run detection below "
+                 "builds one and switches to it.")
+        if os.path.join(PROJECT_ROOT, picked) != DB_PATH:
+            st.session_state["db_path"] = os.path.join(PROJECT_ROOT, picked)
+            st.rerun()
 
-    if st.button("▶ Run detection", use_container_width=True, type="primary"):
-        log_path = os.path.join(PROJECT_ROOT, log_file)
+    # Default the box to the log this database was actually built from, so the
+    # two never silently disagree.
+    shown_source = guess_source_log() if os.path.exists(DB_PATH) else None
+    default_log = (os.path.relpath(shown_source, PROJECT_ROOT)
+                   if shown_source and os.path.exists(shown_source)
+                   else "data/sample.ndjson")
+    log_file = st.text_input("Log file", value=default_log)
+
+    if st.button("▶ Run detection", width="stretch", type="primary"):
+        log_path = log_file if os.path.isabs(log_file) else \
+            os.path.join(PROJECT_ROOT, log_file)
         if not os.path.exists(log_path):
             st.error(f"Not found: {log_file}")
         else:
-            with st.spinner("Streaming logs and applying rules..."):
-                result = subprocess.run(
-                    [sys.executable, os.path.join(PROJECT_ROOT, "src", "parser.py"),
-                     "--input", log_path],
-                    capture_output=True, text=True, cwd=PROJECT_ROOT)
-            if result.returncode == 0:
-                st.success("Detection complete")
-                st.code(result.stdout[-1200:], language="text")
+            # One database per log file, named after it, so a run never
+            # overwrites another data set's results.
+            stem = os.path.splitext(os.path.basename(log_path))[0]
+            target_db = os.path.join(PROJECT_ROOT, f"{stem}.db")
+            steps = [
+                ("Streaming logs and applying rules...",
+                 [sys.executable, os.path.join(PROJECT_ROOT, "src", "parser.py"),
+                  "--input", log_path, "--db", target_db, "--no-cp2"]),
+                # Without this the Evidence, What we can't see, Respond now and
+                # Sources tabs stay empty.
+                ("Building the evidence and gap layer...",
+                 [sys.executable,
+                  os.path.join(PROJECT_ROOT, "scripts", "run_cp2.py"),
+                  "--db", target_db, "--input", log_path]),
+            ]
+            output, ok = [], True
+            for label, cmd in steps:
+                with st.spinner(label):
+                    result = subprocess.run(
+                        cmd, capture_output=True, text=True, cwd=PROJECT_ROOT,
+                        encoding="utf-8", errors="replace",
+                        env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+                output.append(result.stdout)
+                if result.returncode != 0:
+                    output.append(result.stderr)
+                    ok = False
+                    break
+            st.session_state["last_run"] = {
+                "ok": ok, "db": os.path.basename(target_db),
+                "output": "\n".join(output)}
+            if ok:
+                st.session_state["db_path"] = target_db
                 st.cache_data.clear()
-            else:
-                st.error("Parser failed")
-                st.code(result.stderr[-1200:], language="text")
+                st.rerun()
+
+    # Shown after the rerun that switched to the new database.
+    last = st.session_state.get("last_run")
+    if last:
+        if last["ok"]:
+            st.success(f"Detection complete — showing {last['db']}")
+        else:
+            st.error("Pipeline failed")
+        st.code(last["output"][-1500:], language="text")
 
     st.divider()
     key_present = bool(os.environ.get("GROQ_API_KEY"))
@@ -588,7 +716,7 @@ if estate:
             "Technique": s["technique"], "Name": s["technique_name"],
             "Machines": s["hosts"], "Accounts": s["accounts"],
             "Detections": s["detections"], "Allowed through": s["allowed"],
-        } for s in estate], use_container_width=True, hide_index=True)
+        } for s in estate], width="stretch", hide_index=True)
 
 st.divider()
 
@@ -634,7 +762,7 @@ with tab_timeline:
             "Account": s["user"],
             "Sev": s["severity"],
         })
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, width="stretch", hide_index=True)
 
 with tab_graph:
     st.subheader("Attack path graph")
@@ -659,10 +787,11 @@ with tab_next:
         st.dataframe(
             [{"Target": a["target"],
               "Role": a["role"] or "-",
-              "Criticality": a["criticality"] or "-",
+              # One type per column: mixing ints with "-" fails Arrow conversion.
+              "Criticality": str(a["criticality"]) if a["criticality"] else "-",
               "Basis": a["basis"],
               "Why": a["reason"]} for a in ahead],
-            use_container_width=True, hide_index=True)
+            width="stretch", hide_index=True)
 
 with tab_hunt:
     # THREAT HUNTING -- the inverse of every other tab.
@@ -690,7 +819,7 @@ with tab_hunt:
         st.markdown("**Detections over time** — attacks usually arrive in bursts.")
         st.bar_chart(
             {b["hour"]: b["detections"] for b in buckets},
-            height=180, use_container_width=True)
+            height=180, width="stretch")
         busiest = max(buckets, key=lambda b: b["detections"])
         st.caption(f"Busiest hour: **{busiest['hour']}** with "
                    f"{busiest['detections']:,} detections.")
@@ -706,7 +835,7 @@ with tab_hunt:
               "Worst severity": e["max_severity"],
               "Kill chain stages": ", ".join(e["kill_chain_stages"]) or "-"}
              for e in ranked[kind]],
-            use_container_width=True, hide_index=True)
+            width="stretch", hide_index=True)
 
 
 # ===========================================================================
@@ -772,7 +901,7 @@ with tab_evidence:
     if not CP2_AVAILABLE:
         st.warning("The chronopath2 package could not be imported.")
     elif not cp2_has_data(db_signature()):
-        cp2_missing_notice()
+        cp2_missing_notice("cp2_build_1")
     else:
         sig = db_signature()
         links = cp2_read(
@@ -850,10 +979,12 @@ with tab_evidence:
         )
         log_for_raw = st.text_input(
             "Source log file",
-            value=st.session_state.get("cp2_log_path", "D:/firex-10G.log"),
-            key="cp2_raw_log")
+            value=st.session_state.get(
+                f"cp2_log_path:{DB_PATH}",
+                guess_source_log() or "D:/firex-10G.log"),
+            key=f"cp2_raw_log:{DB_PATH}")
         if st.button("Fetch raw lines for this incident"):
-            st.session_state["cp2_log_path"] = log_for_raw
+            st.session_state[f"cp2_log_path:{DB_PATH}"] = log_for_raw
             if not os.path.exists(log_for_raw):
                 st.error(f"Not found: {log_for_raw}")
             else:
@@ -913,7 +1044,7 @@ with tab_blind:
     if not CP2_AVAILABLE:
         st.warning("The chronopath2 package could not be imported.")
     elif not cp2_has_data(db_signature()):
-        cp2_missing_notice()
+        cp2_missing_notice("cp2_build_2")
     else:
         sig = db_signature()
 
@@ -1013,7 +1144,7 @@ with tab_respond:
     if not CP2_AVAILABLE:
         st.warning("The chronopath2 package could not be imported.")
     elif not cp2_has_data(db_signature()):
-        cp2_missing_notice()
+        cp2_missing_notice("cp2_build_3")
     else:
         sig = db_signature()
         inds = cp2_read(sig,
@@ -1029,7 +1160,7 @@ with tab_respond:
                   "Last seen (whole data set)": row["last_seen"],
                   "Detections": row["occurrences"],
                   "Note": row["note"] or ""} for row in inds],
-                use_container_width=True, hide_index=True)
+                width="stretch", hide_index=True)
 
             still = [row for row in inds
                      if (row["note"] or "").startswith("STILL ACTIVE")]
@@ -1071,7 +1202,7 @@ with tab_respond:
                   "Technique": row["mitre_technique"],
                   "Outcome": row["outcome"], "Raw events": row["raw"]}
                  for row in pre["rows"][:60]],
-                use_container_width=True, hide_index=True)
+                width="stretch", hide_index=True)
 
         # Recommended actions.
         st.divider()
@@ -1116,6 +1247,7 @@ with tab_sources:
                 "No coverage pass has been run for this database. Run:\n\n"
                 f"```\npython scripts/build_coverage.py --input <log> --db "
                 f"{os.path.basename(DB_PATH)}\n```")
+            build_cp2_now("cp2_build_sources")
         for fp in fps:
             st.markdown(f"#### {fp['source']}")
             c1, c2, c3, c4 = st.columns(4)
@@ -1170,7 +1302,7 @@ with tab_sources:
                       "Active hours": r["active_hours"],
                       "First": str(r["first_hour"]),
                       "Last": str(r["last_hour"])} for r in rows],
-                    use_container_width=True, hide_index=True)
+                    width="stretch", hide_index=True)
 
                 vol = cp2_read(sig,
                                "SELECT hour_bucket, SUM(event_count) AS events "

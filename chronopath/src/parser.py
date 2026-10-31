@@ -39,6 +39,7 @@ import yaml
 # so the module's own directory must be importable both ways.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ecs_adapter  # noqa: E402
+import applog_adapter  # noqa: E402
 import fortigate_adapter  # noqa: E402
 
 # The log schema. Declaring it explicitly is a deliberate performance decision --
@@ -61,7 +62,7 @@ DEFAULT_DB = "chronopath.db"
 
 def detect_format(log_path):
     """
-    Work out which of the three supported log formats this file is.
+    Work out which of the four supported log formats this file is.
 
     Auto-detection rather than a mandatory flag, because the judges will point
     the tool at their own file and a wrong flag yields a baffling empty result
@@ -69,7 +70,9 @@ def detect_format(log_path):
 
         fortigate  lines begin `date=` and contain `devname=` (the real
                    6.5 GB firex-10G.log)
-        ecs        JSON with a nested "event" object or "@timestamp"
+        applog     lines begin `YYYY-MM-DD HH:MM:SS LEVEL [component]` and
+                   contain `action=` (sample1.log)
+        ecs       JSON with a nested "event" object or "@timestamp"
                    (edr_log_generator.py)
         flat       JSON with top-level "timestamp" and scalar "host"
                    (our own sample generator)
@@ -78,6 +81,8 @@ def detect_format(log_path):
     """
     if fortigate_adapter.detect_fortigate(log_path):
         return "fortigate"
+    if applog_adapter.detect_applog(log_path):
+        return "applog"
     return ecs_adapter.detect_format(log_path)
 
 
@@ -173,6 +178,8 @@ def source_expr(log_path, log_format=None):
         log_format = detect_format(log_path)
     if log_format == "fortigate":
         return fortigate_adapter.fortigate_source_expr(log_path)
+    if log_format == "applog":
+        return applog_adapter.applog_source_expr(log_path)
     if log_format == "ecs":
         return ecs_adapter.ecs_source_expr(log_path)
 
@@ -481,7 +488,8 @@ def run(log_path, rules_path=None, db_path=DEFAULT_DB,
         log_format = detect_format(log_path)
     if rules_path is None:
         rules_path = {"ecs": "rules_ecs.yaml",
-                      "fortigate": "rules_fortigate.yaml"}.get(
+                      "fortigate": "rules_fortigate.yaml",
+                      "applog": "rules_applog.yaml"}.get(
                           log_format, "rules.yaml")
 
     rules = load_rules(rules_path)
@@ -562,12 +570,14 @@ def main():
     ap.add_argument("--input", default="data/sample.ndjson", help="NDJSON log file")
     ap.add_argument("--rules", default=None,
                     help="Rule file (default: auto-chosen from the log format)")
-    ap.add_argument("--format", choices=["ecs", "flat", "fortigate"],
+    ap.add_argument("--format", choices=["ecs", "flat", "fortigate", "applog"],
                     default=None,
                     help="Force a log format instead of auto-detecting")
     ap.add_argument("--db", default=DEFAULT_DB)
     ap.add_argument("--memory-limit", default="8GB",
                     help="DuckDB memory ceiling (PRD 'Great' bar is under 8GB)")
+    ap.add_argument("--no-cp2", action="store_true",
+                    help="Skip building the 2.0 evidence and coverage layer")
     args = ap.parse_args()
 
     if not os.path.exists(args.input):
@@ -576,6 +586,24 @@ def main():
             f"Generate one first:  python scripts/generate_sample.py")
 
     run(args.input, args.rules, args.db, args.memory_limit, args.format)
+
+    # The 2.0 layer lives in the same database file, which run() deletes and
+    # recreates. Running the parser on its own therefore wiped the Evidence,
+    # What we can't see, Respond now and Sources tabs -- they showed "not
+    # built" until someone remembered run_cp2.py. Build it here so one command
+    # always leaves a complete database.
+    if not args.no_cp2:
+        import subprocess
+        here = os.path.dirname(os.path.abspath(__file__))
+        result = subprocess.run(
+            [sys.executable, os.path.join(here, "..", "scripts", "run_cp2.py"),
+             "--db", args.db, "--input", args.input,
+             "--memory-limit", args.memory_limit])
+        if result.returncode != 0:
+            raise SystemExit(
+                f"Detections were written to {args.db}, but building the 2.0 "
+                f"layer failed. Retry with:\n  python scripts/run_cp2.py "
+                f"--db {args.db} --input {args.input}")
 
 
 if __name__ == "__main__":
