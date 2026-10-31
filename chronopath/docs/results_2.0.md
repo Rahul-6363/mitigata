@@ -268,8 +268,56 @@ is this log."*
 
 **Is it still happening?** No indicator in any of the five incidents appears
 after its incident's last event. The tool says so plainly rather than
-manufacturing urgency. The STILL-ACTIVE path was verified separately by feeding
-it a truncated end time, confirming it is live code and not a dead branch.
+manufacturing urgency.
+
+#### The still-active flag needed three conditions, each found by measuring
+
+This started as a one-line test — *last seen is after the incident ended* — and
+that version was technically true and operationally useless. It was caught by
+**rendering the dashboard against `edr.db`** rather than reasoning about it.
+
+The EDR data holds seven days of ambient estate activity while the incident
+covers four hours of one day, so every ordinary account and internal address
+trivially "appears afterwards". It flagged **30 indicators**, including
+`10.10.1.11` — a workstation that simply exists.
+
+| Condition added | Reason | False flags |
+|---|---|---|
+| *(naive: last seen > incident end)* | — | **30** |
+| **1. Specificity** | An internal address is a place, not an actor | 11 |
+| **2. Not ambient** | ← the one that mattered | **0** |
+| **3. Grace period** | Absorb continuation within the same burst | 0 |
+
+Condition 2 is the real discriminator, and the data makes the case plainly:
+
+| Account | Detections | Distinct days | |
+|---|---|---|---|
+| `svc_helpdesk` | **5** | **1** | ← the attacker |
+| `asharma` | 1,929 | 7 | ordinary staff |
+| `rkumar` | 1,937 | 7 | ordinary staff |
+| `svc_backup` | 3,260 | 7 | ordinary staff |
+
+An indicator present on most days of the file *was never absent*, so "it
+appeared again" says nothing about it. The discriminator is **rarity** — the
+same principle the detection engine already relies on.
+
+**The grace period was initially wrong, in the dangerous direction.** At 60
+minutes it suppressed a real case: `Deepika.Khan`'s third external admin login
+lands **57.9 minutes** after the second. It is now 30 minutes, which is correct
+because the ambient test does the noise rejection — this only has to span a
+burst.
+
+**Verified in both directions**, which matters more than either number alone:
+
+```
+A. the 57.9-minute real case      -> 2 indicators FLAGGED   ✅
+B. the ambient EDR accounts       -> 0 indicators flagged   ✅
+```
+
+**The cost of this precision, stated in the code:** a compromised *internal*
+host still beaconing would not be flagged. That is the right trade for a field
+whose job is to say *"drop everything"* — one that cries wolf thirty times is a
+field an analyst learns to ignore, which is strictly worse than not having it.
 
 ### Preceding access — an explicit negative
 
