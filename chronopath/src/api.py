@@ -38,6 +38,8 @@ ENDPOINTS
     GET /incidents/{id}/graph    nodes and edges for the attack graph
     GET /incidents/{id}/next     what the attacker could reach next (FR-6)
     GET /incidents/{id}/report   plain-English narrative (B-2)
+    GET /incidents/{id}/elliot   the investigator's brief
+    GET /incidents/{id}/elliot/ask?q=...   ask the investigator a question
     GET /stats                   corpus-level summary
     GET /metrics                 timing, for the PRD investigation-speed target
 
@@ -51,10 +53,11 @@ import os
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import graph_engine  # noqa: E402
+from elliot import QUESTIONS, Investigator  # noqa: E402
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def _pick_database():
@@ -351,6 +354,8 @@ class Handler(BaseHTTPRequestHandler):
                         "GET /incidents/{id}/graph": "graph nodes and edges (FR-5)",
                         "GET /incidents/{id}/next": "what they could reach next (FR-6)",
                         "GET /incidents/{id}/report": "plain-English report (B-2)",
+                        "GET /incidents/{id}/elliot": "investigator brief: findings, theories, next moves",
+                        "GET /incidents/{id}/elliot/ask?q=...": "ask the investigator",
                         "GET /pivot": "entities ranked by anomaly (hunting)",
                         "GET /timeline": "detections per hour",
                         "GET /stats": "corpus summary",
@@ -637,8 +642,40 @@ class Handler(BaseHTTPRequestHandler):
                     "structured_summary": summary,
                 }, started=started)
 
+            # GET /incidents/{id}/elliot[/ask|/resolve|/verdict|/decide|/examined]
+            # The investigator. GET-only like the rest of this local API, so
+            # every call can be tried from a browser address bar.
+            if action == "elliot":
+                q = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
+                inv = Investigator(DB_PATH, inc)
+                sub = parts[3].lower() if len(parts) > 3 else ""
+                if sub == "":
+                    return self._send(inv.brief(), started=started)
+                if sub == "ask":
+                    if not q.get("q"):
+                        return self._send({"error": "add ?q=<your question>",
+                                           "suggested": list(QUESTIONS)}, 400, started)
+                    return self._send(inv.ask(q["q"]), started=started)
+                if sub == "resolve":
+                    ok = inv.resolve(q.get("key", ""), q.get("status", "done"),
+                                     q.get("note", ""))
+                    return self._send({"recorded": ok}, 200 if ok else 404, started)
+                if sub == "verdict":
+                    inv.set_verdict(q.get("h", "").upper(), q.get("verdict", "rejected"),
+                                    q.get("reason", ""))
+                    return self._send({"recorded": True}, started=started)
+                if sub == "decide":
+                    inv.decide(q.get("text", ""))
+                    return self._send({"recorded": True}, started=started)
+                if sub == "examined":
+                    inv.mark_examined(q.get("ids", "").split(","))
+                    return self._send({"recorded": True}, started=started)
+                return self._send({"error": f"Unknown investigator action '{sub}'",
+                                   "valid": ["", "ask", "resolve", "verdict",
+                                             "decide", "examined"]}, 404, started)
+
             return self._send({"error": f"Unknown action '{action}'",
-                               "valid": ["path", "graph", "next", "report"]},
+                               "valid": ["path", "graph", "next", "report", "elliot"]},
                               404, started)
 
         except Exception as exc:  # never return a bare stack trace

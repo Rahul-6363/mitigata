@@ -195,9 +195,15 @@ def check_rules(r):
 
 def check_tests(r):
     print("\n3. Test suite (includes the regression gate)")
-    path = os.path.join(ROOT, "tests", "test_chronopath2.py")
+    for name, label in (("test_chronopath2.py", "test suite"),
+                        ("test_elliot.py", "investigator tests")):
+        _run_test_file(r, name, label)
+
+
+def _run_test_file(r, name, label):
+    path = os.path.join(ROOT, "tests", name)
     if not os.path.exists(path):
-        r.bad("tests/test_chronopath2.py missing")
+        r.bad(f"tests/{name} missing")
         return
     ok, out = run([PY, path])
     last = [l for l in out.strip().splitlines() if l.strip()]
@@ -207,14 +213,14 @@ def check_tests(r):
         detail = summary
         if skipped:
             detail += f"  ({skipped} skipped -- see below)"
-        r.ok("test suite", detail)
+        r.ok(label, detail)
         for line in out.splitlines():
             if "SKIP:" in line:
                 print(f"         {c(DIM, line.strip())}")
     else:
         fails = [l.strip() for l in out.splitlines() if "- test_" in l]
-        r.bad("test suite", summary + ("  " + "; ".join(fails[:2]) if fails else ""),
-              "python tests/test_chronopath2.py   (for the full output)")
+        r.bad(label, summary + ("  " + "; ".join(fails[:2]) if fails else ""),
+              f"python tests/{name}   (for the full output)")
 
 
 # ---------------------------------------------------------------------------
