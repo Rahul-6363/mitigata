@@ -35,7 +35,7 @@ results on the organisers' real data, and the current numbers live here:
 | Peak memory | **813 MB** detection, 590 MB for the 2.0 layer |
 | Open one incident | **4 ms** |
 
-**ChronoPath 2.0** adds an evidence-and-gap layer on top: graded link evidence
+**ChronoPath** also carries an evidence-and-gap layer: graded link evidence
 with raw log lines, a gap ledger that states what the data cannot show, a
 measured blind-window check, and a respond-now panel. See the pitch.
 

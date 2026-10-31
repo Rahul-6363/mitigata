@@ -1,4 +1,4 @@
-# 🕸️ ChronoPath 2.0 — Kill Chain & Attack Path Analysis
+# 🕸️ ChronoPath — Kill Chain & Attack Path Analysis
 
 **CyberForge Hackathon · Mitigata · 31 Oct – 1 Nov 2026**
 **Tier: Core (15 GB)**
@@ -10,21 +10,17 @@
 
 Reads a large pile of security logs, finds the attack hidden inside, and shows
 it as one story: where the attacker started, what they did, and where they can
-go next.
+go next — then shows the **raw evidence behind every step**, states **what it
+could not see**, and says **what to do next**.
 
-**ChronoPath 2.0** adds the part that makes it usable by an analyst rather than
-just impressive to a reviewer — it shows the **raw evidence behind every step**,
-states **what it could not see**, and says **what to do next**:
+> ChronoPath reconstructs the attack, shows the raw evidence behind every step,
+> detects when the attacker blinded your logging, and tells the analyst what
+> they can't conclude, what to contain now, and what evidence to request next.
 
-> ChronoPath 2.0 reconstructs the attack, shows the raw evidence behind every
-> step, detects when the attacker blinded your logging, and tells the analyst
-> what they can't conclude, what to contain now, and what evidence to request
-> next.
-
-The headline 2.0 finding on the organisers' data is one most tools would get
-wrong: the attacker **disabled the firewall's logging and it did not work.**
-We can prove that, with a measurement, rather than guess either way —
-see [§ What ChronoPath 2.0 adds](#-what-chronopath-20-adds).
+The finding on the organisers' data that most tools would get wrong: the
+attacker **disabled the firewall's logging and it did not work.** We can prove
+that, with a measurement, rather than guess either way — see
+[§ Evidence, gaps and response](#-evidence-gaps-and-response).
 
 ---
 
@@ -36,7 +32,7 @@ see [§ What ChronoPath 2.0 adds](#-what-chronopath-20-adds).
 
 ```bash
 python src/parser.py --input D:/firex-10G.log --db firex.db --memory-limit 6GB
-python scripts/run_cp2.py --db firex.db --input D:/firex-10G.log   # the 2.0 layer
+python scripts/run_cp2.py --db firex.db --input D:/firex-10G.log   # evidence + gaps
 python scripts/evaluate.py --db firex.db --truth data/ground_truth_firex.json
 streamlit run src/app.py        # or: python src/api.py
 ```
@@ -91,17 +87,17 @@ Full write-up, including the two metrics that do not pass and why:
 
 ---
 
-## 🆕 What ChronoPath 2.0 adds
+## 🆕 Evidence, gaps and response
 
-ChronoPath 1.x answers *"what happened?"* — and does it well: 100% detection
-and 100% correct ATT&CK labels on 9.1 million real events. But an analyst
-handed a ranked incident list still has three questions it cannot answer, and a
-tool that cannot answer them is a tool they have to re-do by hand.
+Detection alone answers *"what happened?"* — and ChronoPath does that well: 100%
+detection and 100% correct ATT&CK labels on 9.1 million real events. But an
+analyst handed a ranked incident list still has three questions, and a tool that
+cannot answer them is a tool they have to re-do by hand.
 
-2.0 answers them, in the order an analyst actually works. **Full measured
-results: [docs/results_2.0.md](docs/results_2.0.md).**
+ChronoPath answers them too, in the order an analyst actually works. **Full
+measured results: [docs/results_2.0.md](docs/results_2.0.md).**
 
-| Question | What 2.0 shows | Module |
+| Question | What it shows | Module |
 |---|---|---|
 | **Can I trust the data?** | Per-stream coverage, SHA-256 provenance, which clock was used | `streams.py` |
 | **Was I blinded?** | Whether a logging-disable event actually cost us visibility — *measured* | `blind_window.py` |
@@ -109,10 +105,12 @@ results: [docs/results_2.0.md](docs/results_2.0.md).**
 | **What can't I see?** | A gap ledger with the basis, the impact, and the evidence to request | `gaps.py` |
 | **What do I do now?** | Indicators, whether it is still happening, recommended containment | `respond.py` |
 
-Everything is **additive**. The 2.0 modules write new `cp2_` tables and never
-touch `suspicious_events`; the detection engine is not edited at all. A
-regression gate enforces this — the 1.x numbers must come out byte-identical,
-and [12 tests](tests/test_chronopath2.py) check it.
+These five modules live in [`src/chronopath2/`](src/chronopath2/) — the name is
+the *version*, not a separate product. Everything about them is **additive**:
+they write new `cp2_` tables, never touch `suspicious_events`, and the detection
+engine is not edited at all. A regression gate enforces that — the earlier
+detection numbers must come out byte-identical, and
+[16 tests](tests/test_chronopath2.py) check it.
 
 ### 🥇 The finding we are most pleased with: the attacker's blinding *failed*
 
@@ -569,7 +567,7 @@ beginning, a middle, and a prediction of the ending.
 would risk the core demo. Shipping the other four bonuses solidly beats shipping
 five shakily.
 
-### ChronoPath 2.0 additions
+### Beyond the PRD — the evidence and gap layer
 
 Beyond the PRD, because the PRD's own framing — *"analysts waste hours
 reconstructing what happened"* — does not end when the reconstruction appears.
@@ -631,20 +629,20 @@ chronopath/
 ├── assets.yaml            Host/privilege inventory           (FR-6)
 ├── run_demo.py            Whole pipeline in one command
 ├── data/                  Generated logs + ground truth (gitignored)
-├── docs/                                                        ← 2.0
+├── docs/
 │   ├── baseline_before_2.0.md  The 1.x numbers the gate protects
 │   └── results_2.0.md          Every 2.0 measurement, with method
 ├── tests/
-│   └── test_chronopath2.py     12 tests incl. the regression gate  ← 2.0
+│   └── test_chronopath2.py     16 tests incl. the regression gate
 ├── scripts/
 │   ├── generate_sample.py Logs with a planted attack + answer key
 │   ├── prepare_edr.py     Makes organisers' EDR output realistic
 │   ├── discover_firex.py  Finds the planted attack by rarity analysis
 │   ├── benchmark.py       Proves the streaming/memory claim
 │   ├── evaluate.py        Scores the four PRD metrics
-│   ├── build_coverage.py       Telemetry coverage + provenance    ← 2.0
-│   ├── run_cp2.py              The whole 2.0 layer, one command   ← 2.0
-│   └── experiment_remove_host.py  Controlled remove-a-host test   ← 2.0
+│   ├── build_coverage.py       Telemetry coverage + provenance
+│   ├── run_cp2.py              The evidence layer, one command
+│   └── experiment_remove_host.py  Controlled remove-a-host test
 └── src/
     ├── parser.py          DuckDB streaming detection    (FR-1, 2, 3)
     ├── ecs_adapter.py     Reads ECS JSON as flat
@@ -653,7 +651,7 @@ chronopath/
     ├── pivot.py           Anomaly ranking + frequency timeline (hunting)
     ├── api.py             REST API, stdlib only         (FR-7)
     ├── app.py             Streamlit dashboard + Groq    (FR-5, 6, 7, B-1/2/3)
-    └── chronopath2/            The 2.0 evidence & gap layer      ← 2.0
+    └── chronopath2/            Evidence & gap layer (v2 modules)
         ├── streams.py          Coverage + provenance   (Task 1)
         ├── blind_window.py     Did the blinding work?  (Task 2)
         ├── link_evidence.py    Graded links + raw lines (Task 3)
@@ -744,13 +742,13 @@ Run `python scripts/run_cp2.py --db firex.db --input D:/firex-10G.log` first.
    still over?'. And no brute-force burst before this login, which tells you
    the credential came from somewhere else."*
 6. **The proof (30 s, if asked).** `python scripts/experiment_remove_host.py`.
-   *"We deleted a host from the data. 1.x went from 8 of 8 steps to 3 of 8. And
+   *"We deleted a host from the data. Detection went from 8 of 8 steps to 3 of 8. And
    three new gaps appeared, naming the account that now has no origin. On the
    full data that gap correctly doesn't fire. Zero records of the removed host
    anywhere in the output — we don't invent what we can't see."*
 
-**The line to close on:** *"Hayabusa tells you what fired. ChronoPath 1.x tells
-you what happened. ChronoPath 2.0 tells you what you can prove, what you
+**The line to close on:** *"Hayabusa tells you what fired. A detection tool
+tells you what happened. ChronoPath tells you what you can prove, what you
 can't, and what to do about it."*
 
 ---

@@ -1,4 +1,4 @@
-# 🕸️ ChronoPath 2.0 — Pitch
+# 🕸️ ChronoPath — Pitch
 
 **CyberForge Hackathon · Mitigata · 31 Oct – 1 Nov 2026**
 **Problem statement: Kill Chain and Attack Path Analysis**
@@ -12,7 +12,7 @@
 
 ## The one-liner
 
-> **ChronoPath 2.0 reconstructs the attack from millions of raw log lines, shows
+> **ChronoPath reconstructs the attack from millions of raw log lines, shows
 > the raw evidence behind every step, detects when the attacker tried to blind
 > your logging, and tells the analyst what they can't conclude, what to contain
 > now, and what evidence to request next.**
@@ -41,24 +41,26 @@ believe it. In practice they ask three questions that most tools cannot answer:
 3. *"What do I do in the next ten minutes?"*
 
 A tool that cannot answer those is a tool the analyst has to re-do by hand.
-**That is what ChronoPath 2.0 is for.**
+**That is the half of the problem ChronoPath also solves.**
 
 ---
 
 ## What we built
 
-Two layers, deliberately separated.
+One pipeline, two layers, deliberately separated so that neither can break
+the other.
 
-### ChronoPath 1.x — what happened
+### The detection engine — what happened
 
 Streams the file with DuckDB (never loads it), applies 12 config-driven rules,
 tags each hit with a MITRE ATT&CK technique and kill-chain stage, then
 correlates the hits into incidents with union-find over shared entities.
 
-### ChronoPath 2.0 — can I believe it, and what now
+### The evidence layer — can I believe it, and what now
 
-Five modules that read the finished incidents and add evidence *alongside*
-them. They never edit the engine — a regression gate enforces that the 1.x
+Five modules in `src/chronopath2/` (the name is the *version*, not a separate
+product) that read the finished incidents and add evidence *alongside* them.
+They never edit the engine — a regression gate enforces that the detection
 numbers come out identical.
 
 | Module | Answers |
@@ -86,7 +88,7 @@ python scripts/evaluate.py --db firex.db --truth data/ground_truth_firex.json
 | **False alarm rate** | **0%** | <10% = Great |
 | Open one incident | **4 ms** | <500 ms = Great |
 | Peak memory, detection | **813 MB** | <8 GB = Great |
-| Peak memory, 2.0 layer | **590 MB** | — |
+| Peak memory, evidence layer | **590 MB** | — |
 | Events processed | **9,125,382** | — |
 | Detections → incidents | **373,239 → 5** | — |
 
@@ -490,7 +492,7 @@ python src/api.py                                # REST: /evidence /gaps /source
 
 The regression gate is the one to check first. It asserts that the 1.x numbers
 — 373,239 detections, 5 incidents, 100%/100%/0% — are **identical** after the
-2.0 layer. The entire architecture exists to make that test pass.
+evidence layer. The entire architecture exists to make that test pass.
 
 **Full measured results, with method:** [`docs/results_2.0.md`](docs/results_2.0.md)
 **Baseline the gate protects:** [`docs/baseline_before_2.0.md`](docs/baseline_before_2.0.md)
@@ -503,8 +505,8 @@ The regression gate is the one to check first. It asserts that the 1.x numbers
 Three sentences, in increasing order of what matters:
 
 > **Hayabusa tells you what fired.**
-> **ChronoPath 1.x tells you what happened.**
-> **ChronoPath 2.0 tells you what you can prove, what you can't, and what to do about it.**
+> **A detection tool tells you what happened.**
+> **ChronoPath tells you what you can prove, what you can't, and what to do about it.**
 
 And the thing this build is most willing to say out loud: on the organisers'
 data, **the attacker did not blind us** — and reporting that, rather than the
