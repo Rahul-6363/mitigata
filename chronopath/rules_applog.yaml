@@ -1,0 +1,95 @@
+# =============================================================================
+# ChronoPath Detection Rules -- plain-text application logs (sample1.log)
+# =============================================================================
+#
+# Fourth rule file, for the `YYYY-MM-DD HH:MM:SS LEVEL [component] key=value`
+# format read by src/applog_adapter.py. The parser picks it automatically.
+#
+# Same philosophy as rules_fortigate.yaml: failed logins are noise, the rare
+# successes and account changes that follow them are the attack.
+#
+# THRESHOLDS: written against sample1.log, which is 26 lines. The brute-force
+# threshold in particular is set for that sample, not measured on real volume;
+# re-measure it before trusting it on a large file.
+#
+# !! SECURITY NOTE: sql_condition is interpolated into SQL. Trusted local
+# !! config only -- never wire this file to user input.
+# =============================================================================
+
+rules:
+
+  - name: "Admin Login Successful from External IP"
+    type: row
+    mitre_technique: "T1078"
+    mitre_name: "Valid Accounts"
+    kill_chain_stage: "Initial Access"
+    severity: 10
+    sql_condition: >
+      app_action = 'admin_login' AND status = 'success'
+      AND NOT (src_ip LIKE '10.%' OR src_ip LIKE '192.168.%'
+               OR src_ip LIKE '172.16.%' OR src_ip LIKE '127.%')
+    description: >
+      An administrator signed in successfully from a public IP address.
+
+  - name: "Privileged Account Created"
+    type: row
+    mitre_technique: "T1136"
+    mitre_name: "Create Account"
+    kill_chain_stage: "Persistence"
+    severity: 10
+    sql_condition: "app_action = 'admin_account_created'"
+    description: >
+      A new administrator account was created -- mid-intrusion, the attacker
+      giving themselves a durable way back in.
+
+  - name: "Privileged Account Deleted (Anti-Forensics)"
+    type: row
+    mitre_technique: "T1070"
+    mitre_name: "Indicator Removal"
+    kill_chain_stage: "Defense Evasion"
+    severity: 10
+    sql_condition: "app_action = 'admin_account_deleted'"
+    description: >
+      An administrator account was deleted. Paired with a creation shortly
+      before, this is the attacker removing the account they just used.
+
+  - name: "Security Monitoring Disabled"
+    type: row
+    mitre_technique: "T1562"
+    mitre_name: "Impair Defenses"
+    kill_chain_stage: "Defense Evasion"
+    severity: 10
+    sql_condition: >
+      app_action = 'policy_modified' AND app_change LIKE 'disable%'
+    description: >
+      Alerting or audit rules were switched off, blinding the system that
+      would record what happens next.
+
+  - name: "Bulk Sensitive Data Export"
+    type: row
+    mitre_technique: "T1213"
+    mitre_name: "Data from Information Repositories"
+    kill_chain_stage: "Collection"
+    severity: 9
+    sql_condition: >
+      app_action = 'db_dump' OR bytes_out >= 50000000
+    description: >
+      A bulk export of a database table, or any single action moving 50 MB or
+      more.
+
+  - name: "Admin Brute Force"
+    type: aggregate
+    mitre_technique: "T1110"
+    mitre_name: "Brute Force"
+    kill_chain_stage: "Credential Access"
+    severity: 7
+    sql_condition: "app_action = 'admin_login' AND status = 'failed'"
+    # Failed logins prove an attempt, not access. It becomes an incident only
+    # when it correlates with a success from the same address.
+    outcome: attempted
+    group_by: ["src_ip"]
+    bucket_minutes: 60
+    having: "COUNT(*) >= 3"
+    description: >
+      Three or more failed administrator logins from one address within an
+      hour.

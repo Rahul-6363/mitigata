@@ -34,6 +34,7 @@ SATISFIES
 
 import json
 import os
+import re
 from collections import defaultdict
 from datetime import datetime
 
@@ -189,6 +190,10 @@ def _created_account(event):
     cmd = (event.get("command_line") or event.get("message") or "").strip()
     if not cmd:
         return None
+    # Application-log shape: `Privileged admin account created: <name>`.
+    m = re.search(r"\baccount created:\s*(\S+)", cmd, re.IGNORECASE)
+    if m:
+        return m.group(1).strip('"')
     lowered = cmd.lower()
     if not any(k in lowered for k in ("/add", "useradd", "adduser")):
         return None
@@ -476,6 +481,20 @@ def correlate_incidents(events, window_minutes=CORRELATION_WINDOW_MINUTES):
         distinct_users.discard(None)
         if len(distinct_users) > MAX_USERS_PER_SHARED_ENTITY:
             promiscuous.append(key)
+
+    # A host that every detection shares is the log source, not a meeting
+    # point. A single application's log names one machine on every line, so
+    # linking on it merged two intrusions from different addresses and
+    # different accounts into one incident -- with three accounts it slipped
+    # under the threshold above. It carries no information about who acted
+    # together, so it is not a link.
+    host_keys = [k for k in buckets if k[0] == "host"]
+    if len(host_keys) == 1 and len(buckets[host_keys[0]]) == len(events) \
+            and host_keys[0] not in promiscuous:
+        distinct_users = {events[i].get("user") for i in buckets[host_keys[0]]}
+        distinct_users -= {None, *_NON_IDENTITIES}
+        if len(distinct_users) > 1:
+            promiscuous.append(host_keys[0])
     for key in promiscuous:
         del buckets[key]
 

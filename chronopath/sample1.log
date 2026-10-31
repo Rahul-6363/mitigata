@@ -1,0 +1,26 @@
+2026-10-30 08:48:36 INFO [auth] event_id=1001 src_ip=10.10.1.15 user=alice action=user_login status=success session_id=sess_8821a msg="Standard user login succeeded"
+2026-10-30 08:48:38 INFO [web] event_id=1002 src_ip=10.10.1.15 user=alice action=http_request method=GET uri="/portal/home" status=200 bytes=4120
+2026-10-30 08:48:41 WARN [auth] event_id=1003 src_ip=185.220.101.44 user=admin action=admin_login status=failed reason=invalid_credentials attempt=1 msg="Failed admin login"
+2026-10-30 08:48:43 WARN [auth] event_id=1004 src_ip=185.220.101.44 user=admin action=admin_login status=failed reason=invalid_credentials attempt=2 msg="Failed admin login"
+2026-10-30 08:48:45 WARN [auth] event_id=1005 src_ip=185.220.101.44 user=admin action=admin_login status=failed reason=invalid_credentials attempt=3 msg="Failed admin login"
+2026-10-30 08:48:46 INFO [auth] event_id=1006 src_ip=10.10.1.22 user=bob action=user_login status=success session_id=sess_8822b msg="Standard user login succeeded"
+2026-10-30 08:48:48 WARN [auth] event_id=1007 src_ip=185.220.101.44 user=admin action=admin_login status=failed reason=invalid_credentials attempt=4 msg="Failed admin login"
+2026-10-30 08:48:50 WARN [auth] event_id=1008 src_ip=185.220.101.44 user=admin action=admin_login status=failed reason=invalid_credentials attempt=5 msg="Failed admin login"
+2026-10-30 08:48:53 CRIT [auth] event_id=1009 src_ip=185.220.101.44 user=admin action=admin_login status=success session_id=sess_9901x msg="Admin login succeeded after multiple failed attempts"
+2026-10-30 08:48:59 INFO [web] event_id=1010 src_ip=10.10.1.22 user=bob action=http_request method=GET uri="/api/v1/reports" status=200 bytes=1890
+2026-10-30 08:49:04 CRIT [iam] event_id=1011 src_ip=185.220.101.44 user=admin action=admin_account_created target_user=svc_updater role=superadmin session_id=sess_9901x msg="Privileged admin account created: svc_updater"
+2026-10-30 08:49:10 INFO [auth] event_id=1012 src_ip=185.220.101.44 user=svc_updater action=admin_login status=success session_id=sess_9902y msg="Admin login succeeded for newly created account"
+2026-10-30 08:49:18 WARN [security] event_id=1013 src_ip=185.220.101.44 user=svc_updater action=policy_modified target=audit_policy change=disable_alerts session_id=sess_9902y msg="Security monitoring rules modified by admin"
+2026-10-30 08:49:25 CRIT [data] event_id=1014 src_ip=185.220.101.44 user=svc_updater action=db_dump target=prod_users_table bytes=104857600 session_id=sess_9902y msg="Bulk sensitive data export executed"
+2026-10-30 08:49:33 CRIT [iam] event_id=1015 src_ip=185.220.101.44 user=admin action=admin_account_deleted target_user=svc_updater session_id=sess_9901x msg="Privileged admin account deleted: svc_updater"
+2026-10-30 08:49:36 INFO [auth] event_id=1016 src_ip=185.220.101.44 user=admin action=admin_logout status=success session_id=sess_9901x msg="Admin session terminated"
+2026-10-30 08:49:42 INFO [system] event_id=1017 src_ip=127.0.0.1 user=system action=health_check status=ok cpu=14.2 mem=41.8
+2026-10-30 08:49:50 WARN [auth] event_id=1018 src_ip=45.33.32.156 user=root action=admin_login status=failed reason=invalid_credentials attempt=1 msg="Failed admin login"
+2026-10-30 08:49:52 WARN [auth] event_id=1019 src_ip=45.33.32.156 user=root action=admin_login status=failed reason=invalid_credentials attempt=2 msg="Failed admin login"
+2026-10-30 08:50:01 INFO [auth] event_id=1020 src_ip=10.10.1.30 user=charlie action=user_login status=success session_id=sess_8830c msg="Standard user login succeeded"
+2026-10-30 08:50:15 WARN [auth] event_id=1021 src_ip=198.51.100.77 user=sysadmin action=admin_login status=failed reason=invalid_credentials attempt=1 msg="Failed admin login"
+2026-10-30 08:50:17 WARN [auth] event_id=1022 src_ip=198.51.100.77 user=sysadmin action=admin_login status=failed reason=invalid_credentials attempt=2 msg="Failed admin login"
+2026-10-30 08:50:20 CRIT [auth] event_id=1023 src_ip=198.51.100.77 user=sysadmin action=admin_login status=success session_id=sess_9910z msg="Admin login succeeded after multiple failed attempts"
+2026-10-30 08:50:28 CRIT [iam] event_id=1024 src_ip=198.51.100.77 user=sysadmin action=admin_account_created target_user=temp_root role=superadmin session_id=sess_9910z msg="Privileged admin account created: temp_root"
+2026-10-30 08:50:35 CRIT [iam] event_id=1025 src_ip=198.51.100.77 user=sysadmin action=admin_account_deleted target_user=temp_root session_id=sess_9910z msg="Privileged admin account deleted: temp_root"
+2026-10-30 08:50:40 INFO [web] event_id=1026 src_ip=10.10.1.15 user=alice action=http_request method=POST uri="/portal/logout" status=200 bytes=512
