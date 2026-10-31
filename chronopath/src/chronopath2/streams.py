@@ -68,6 +68,7 @@ Two places here could trivially blow a 16 GB laptop and neither does:
 import hashlib
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 # Read the file in 8 MB slices when hashing. Large enough that syscall overhead
@@ -326,7 +327,7 @@ def build_stream_volume(con, source_expr, source_name, log_format):
 
 def build_fingerprint(con, log_path, source_name, log_format,
                       total_rows=None, parsed_rows=None, rejected_rows=None,
-                      exact_range=None):
+                      exact_range=None, sha=None):
     """
     Record provenance for one input file.
 
@@ -337,7 +338,8 @@ def build_fingerprint(con, log_path, source_name, log_format,
     """
     _ensure_tables(con)
 
-    sha, size = sha256_streaming(log_path)
+    # `sha` is (digest, size) when the caller already hashed the file.
+    sha, size = sha or sha256_streaming(log_path)
 
     if log_format == "fortigate":
         probe = _probe_fortigate(log_path)
@@ -397,8 +399,31 @@ def build_fingerprint(con, log_path, source_name, log_format,
     }
 
 
+def has_current_record(con, log_path, source_name):
+    """
+    Whether coverage for this exact file is already recorded -- normally by
+    the parser's scan moments earlier -- so it need not be read again.
+
+    Same path and size, recorded after the file last changed. That is a
+    freshness check, not proof of identical bytes; the stored SHA-256 is the
+    proof, and it was computed over the file during that scan.
+    """
+    try:
+        row = con.execute(
+            "SELECT path, size_bytes, recorded_at FROM cp2_source_fingerprint "
+            "WHERE source = ?", [source_name]).fetchone()
+    except Exception:  # noqa: BLE001 -- table absent: nothing recorded
+        return False
+    if not row:
+        return False
+    path, size, recorded_at = row
+    return (path == os.path.abspath(log_path)
+            and size == os.path.getsize(log_path)
+            and recorded_at.timestamp() >= os.path.getmtime(log_path))
+
+
 def record_source(con, log_path, source_name, log_format, source_expr,
-                  total_rows=None, parsed_rows=None):
+                  total_rows=None, parsed_rows=None, sha=None):
     """
     One call to do both halves of Task 1 for a file: volume, then fingerprint.
 
@@ -406,10 +431,20 @@ def record_source(con, log_path, source_name, log_format, source_expr,
     range, so volume must exist first.
     """
     _ensure_tables(con)
-    vol = build_stream_volume(con, source_expr, source_name, log_format)
+    # The SHA-256 is a second full read of the file. Run it on a thread while
+    # DuckDB does the volume scan: hashlib and DuckDB both release the GIL, so
+    # on a 19.6 GB file this saves the whole hashing time instead of adding it.
+    # `sha` is (digest, size) when the caller already hashed the file.
+    if sha is None:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            digest = pool.submit(sha256_streaming, log_path)
+            vol = build_stream_volume(con, source_expr, source_name, log_format)
+            sha = digest.result()
+    else:
+        vol = build_stream_volume(con, source_expr, source_name, log_format)
     fp = build_fingerprint(con, log_path, source_name, log_format,
                            total_rows=total_rows, parsed_rows=parsed_rows,
-                           exact_range=vol[5:7] if vol else None)
+                           exact_range=vol[5:7] if vol else None, sha=sha)
     fp["volume_rows"] = vol[0] if vol else 0
     return fp
 

@@ -31,6 +31,7 @@ import argparse
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import duckdb
 import yaml
@@ -41,6 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ecs_adapter  # noqa: E402
 import applog_adapter  # noqa: E402
 import fortigate_adapter  # noqa: E402
+from chronopath2 import streams  # noqa: E402
 
 # The log schema. Declaring it explicitly is a deliberate performance decision --
 # see configure_connection() below for why this matters on a 15 GB file.
@@ -369,7 +371,13 @@ def build_aggregate_query(rule, src):
                            PARTITION BY {group_cols},
                                         CAST(epoch(CAST(timestamp AS TIMESTAMP))
                                              / {seconds} AS BIGINT)
-                           ORDER BY event_count DESC
+                           -- The tie-breakers make this deterministic. With
+                           -- event_count alone, equal counts from the two grids
+                           -- were picked arbitrarily, the kept start time
+                           -- moved, and the LAG filter below kept a different
+                           -- number of rows: Password Spraying reported 3,759,
+                           -- 3,760 and 3,761 on three runs of the same file.
+                           ORDER BY event_count DESC, timestamp, message
                        ) AS _rn
                 FROM ( {sql_a} UNION ALL {sql_b} ) AS _grids
             ) AS _ranked
@@ -475,10 +483,9 @@ def run(log_path, rules_path=None, db_path=DEFAULT_DB,
     """
     Execute every rule against the log file and persist the hits.
 
-    One rule = one streaming pass. We could fuse all rules into a single pass with
-    a big OR, and that would be faster, but keeping them separate means a broken
-    rule fails alone instead of taking the whole run down -- worth far more than
-    speed during a hackathon, and the scan is not the bottleneck anyway.
+    The file is streamed once, keeping only lines that match some rule; each
+    rule then runs against that small table. A rule whose SQL does not bind is
+    skipped before the scan, so a broken rule still fails alone.
 
     The rule file defaults to whichever matches the detected log format, because
     ECS logs expose different fields (threat.technique, event.category) than our
@@ -524,7 +531,59 @@ def run(log_path, rules_path=None, db_path=DEFAULT_DB,
     started = time.time()
     total = 0
 
+    # ONE PASS OVER THE FILE, NOT ONE PER RULE. Every rule used to re-read and
+    # re-parse the whole log: on the 18 GB FortiGate file that is ~20 regex
+    # extractions per line, thirteen times over, and took ~15 minutes. Now the
+    # file is scanned once into a small table holding only the lines that match
+    # at least one rule, and the rules run against that. Results are identical
+    # -- each rule still applies its own WHERE, aggregates included -- because
+    # any row a rule could select satisfies the combined OR.
+    #
+    # A broken rule must still fail alone, so each condition is bound first
+    # (EXPLAIN reads no data) and a bad one is left out of the combined filter.
+    usable = []
     for rule in rules:
+        try:
+            con.execute(f"EXPLAIN SELECT 1 FROM {src} WHERE {rule['sql_condition']}")
+            usable.append(rule)
+        except Exception as exc:
+            print(f"  [SKIPPED  ] {rule['name'][:44]:<44} rule failed: {exc}")
+
+    #
+    # The 2.0 coverage record (a SHA-256 of the file plus per-stream hourly
+    # volume) is built here too, so run_cp2.py does not read the file again.
+    # The hash runs on a thread during the scan, which is CPU-bound, so that
+    # second read costs no wall time.
+    #
+    # The volume is a separate lean scan rather than part of this one. Carrying
+    # each line through one combined scan was measured 1.5-2x slower: it makes
+    # DuckDB run all ~28 field regexes on every line, while a WHERE extracts the
+    # full row only for the ~18% of lines that match.
+    if usable:
+        t0 = time.time()
+        combined = " OR ".join(f"({r['sql_condition']})" for r in usable)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            digest = pool.submit(streams.sha256_streaming, log_path)
+            con.execute(f"CREATE TEMP TABLE _candidates AS "
+                        f"SELECT * FROM {src} WHERE {combined}")
+            sha = digest.result()
+        n = con.execute("SELECT COUNT(*) FROM _candidates").fetchone()[0]
+        print(f"  [SCAN      ] one pass, {n} candidate lines kept"
+              f"{'':>17}{time.time() - t0:5.1f}s")
+        t0 = time.time()
+        volume_src = (fortigate_adapter.fortigate_volume_expr(log_path)
+                      if log_format == "fortigate" else src)
+        try:
+            streams.record_source(con, log_path, os.path.basename(log_path),
+                                  log_format, volume_src, sha=sha)
+            print(f"  [COVERAGE  ] stream volume and SHA-256 recorded"
+                  f"{'':>18}{time.time() - t0:5.1f}s")
+        except Exception as exc:
+            # run_cp2.py records coverage itself when it finds none here.
+            print(f"  [COVERAGE  ] not recorded here, run_cp2 will: {exc}")
+        src = "_candidates"
+
+    for rule in usable:
         t0 = time.time()
         if rule.get("type") == "aggregate":
             query = build_aggregate_query(rule, src)

@@ -913,13 +913,18 @@ def look_ahead(incident, hop_limit=None, assets_path="assets.yaml"):
                   key=lambda r: (-r["criticality"], r["target"]))
 
 
-def summarise_for_llm(incident):
+def summarise_for_llm(incident, links=None):
     """
     Flatten an incident into compact text for the language model (bonus B-2).
 
     Kept small and factual on purpose. The model's job is to narrate facts we
     already established deterministically -- not to analyse raw logs. Feeding it
     less reduces both cost and the chance it invents something.
+
+    `links` are the 2.0 layer's cp2_links rows for this incident. Without them
+    the model sees only rule names: given "Firewall Admin Account Created" and
+    no account, it wrote that an account named "Firewall Admin" was created,
+    when the evidence says chirag._Team created svc_backup57.
     """
     path = get_attack_path(incident)
     ahead = look_ahead(incident)
@@ -938,6 +943,12 @@ def summarise_for_llm(incident):
         lines.append(
             f"  {s['step']}. [{s['stage']}] {s['technique']} {s['technique_name']} "
             f"- {s['rule']} on host {s['host']} by user {s['user']}")
+
+    if links:
+        lines.append("")
+        lines.append("How the steps are linked (from the evidence):")
+        for link in links:
+            lines.append(f"  - [{link['grade']}] {link['reason']}")
 
     if ahead:
         lines.append("")

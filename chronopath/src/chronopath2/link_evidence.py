@@ -477,9 +477,21 @@ def enrich_from_source(log_path, incidents, max_scan_hits=None):
             # of lines whose timestamp we actually want, brings it back to a
             # single sequential read.
             #
-            # `want_times` holds just the (date, time) pairs, so the common
-            # case is one tuple hash and one set lookup per line.
-            want_times = {(d, t) for d, t, _ in wanted}
+            # `needles` is keyed by the (date, time) pairs, so the common case
+            # is one tuple hash and one dict lookup per line.
+            #
+            # The time filter alone is not enough on firex-30G.log: from ~30%
+            # in, every line carries the SAME timestamp (2026-10-30 08:48:36),
+            # so a wanted event there made all ~26 million of those lines pass
+            # and hit the regex. `needles` adds a plain substring test for the
+            # wanted accounts first. None means an empty account is wanted,
+            # which a substring cannot express, so those keep the regex path.
+            needles = {}
+            for d, t, u in wanted:
+                if needles.get((d, t), ()) is None:
+                    continue
+                needles[(d, t)] = (None if not u else
+                                   needles.get((d, t), ()) + (f'user="{u}"',))
             for line in f:
                 if not line.startswith("date="):
                     continue
@@ -488,7 +500,11 @@ def enrich_from_source(log_path, incidents, max_scan_hits=None):
                 #   0123456789...
                 date_part = line[5:15]
                 time_part = line[21:29]
-                if (date_part, time_part) not in want_times:
+                key = (date_part, time_part)
+                if key not in needles:
+                    continue
+                users = needles[key]
+                if users is not None and not any(n in line for n in users):
                     continue
                 m_user = re.search(r'user="([^"]*)"', line)
                 user = m_user.group(1) if m_user else ""
