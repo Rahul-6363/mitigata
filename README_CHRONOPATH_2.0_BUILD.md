@@ -6,6 +6,26 @@ The product name stays **ChronoPath**. "2.0" is the version. Do not rename anyth
 
 ---
 
+## ChronoPath Architecture Diagrams
+
+### 1. System Architecture Overview
+The end-to-end architecture: raw logs flow through format adapters into the DuckDB streaming parser, YAML rules turn them into detections, the correlation engine builds ranked incidents, and the ChronoPath 2.0 layer adds evidence, gaps and response before everything reaches the analyst through the Streamlit dashboard and REST API.
+![ChronoPath Architecture Overview](architecture_diagram/overview.png)
+
+### 2. Real Attack Reconstruction (INC-01)
+A backdoor admin account created, used and deleted in twelve minutes. ChronoPath catches all three events among 9.1 million log lines, links them with HARD evidence (the creator and the created account), and ranks the incident #1 because rarity beats volume.
+![INC-01 Attack Sequence](architecture_diagram/attack.png)
+
+### 3. Correlation Engine (Union-Find)
+How ChronoPath decides which detections are one attack: the prevalence split separates rare activity from ambient noise, placeholders and shared infrastructure are refused as links, Union-Find merges events sharing an account (≤120 min) or host (≤15 min), and the six-factor risk score ranks the result.
+![Correlation Logic Flow](architecture_diagram/correlation.png)
+
+### 4. Detection Pipeline
+How one raw log line becomes a detection: format detection and adapters normalise three log formats, DuckDB streams the file in chunks under a memory cap, row and aggregate YAML rules run over it, and every hit is tagged with a MITRE ATT&CK technique (or UNMAPPED) and an outcome before it is stored.
+![Detection Pipeline Flow](architecture_diagram/pipeline.png)
+
+
+
 ## 0. Ground rules (non-negotiable)
 
 1. **Do not change detection, correlation, or scoring behaviour.** `parser.py` rules, the Union-Find grouping, the prevalence split, anchor-and-expand, triage and the six-factor risk score must produce the same incidents as before. 2.0 adds metadata *alongside* them.
