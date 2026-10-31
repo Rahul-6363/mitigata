@@ -35,13 +35,56 @@ import os
 import subprocess
 import sys
 
+import duckdb
 import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import graph_engine  # noqa: E402
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = os.path.join(PROJECT_ROOT, "chronopath.db")
+
+# WHICH DATABASE THE DASHBOARD OPENS
+#
+# Each input gets its own database -- chronopath.db for the flat sample,
+# firex.db for the organisers' 6.54 GB FortiGate file, edr.db for the ECS
+# export. Hardcoding one of them meant the dashboard silently showed the
+# sample while the real findings sat in firex.db, which is a confusing way to
+# lose a demo.
+#
+# So: honour CHRONOPATH_DB if the analyst set it, otherwise pick the most
+# recently written database that actually holds detections. "Most recent" is
+# the right default because it is the one the analyst just produced.
+DB_ENV_VAR = "CHRONOPATH_DB"
+KNOWN_DBS = ("firex.db", "edr.db", "chronopath.db", "edr_removed.db")
+
+
+def _pick_database():
+    override = os.environ.get(DB_ENV_VAR)
+    if override:
+        path = override if os.path.isabs(override) else \
+            os.path.join(PROJECT_ROOT, override)
+        if os.path.exists(path):
+            return path
+    candidates = [os.path.join(PROJECT_ROOT, name) for name in KNOWN_DBS]
+    existing = [p for p in candidates if os.path.exists(p)]
+    if not existing:
+        return os.path.join(PROJECT_ROOT, "chronopath.db")
+    return max(existing, key=os.path.getmtime)
+
+
+DB_PATH = _pick_database()
+
+# The 2.0 evidence layer. Imported defensively: the dashboard must still open
+# on a 1.x database that has never seen chronopath2, showing the four new tabs
+# as empty rather than failing to start.
+try:
+    from chronopath2 import gaps as cp2_gaps
+    from chronopath2 import link_evidence as cp2_links
+    from chronopath2 import respond as cp2_respond
+    from chronopath2 import streams as cp2_streams
+    CP2_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    CP2_AVAILABLE = False
 
 
 def load_env_file():
@@ -108,6 +151,49 @@ def load_incidents(db_mtime):
 
 def db_signature():
     return os.path.getmtime(DB_PATH) if os.path.exists(DB_PATH) else 0
+
+
+# ---------------------------------------------------------------------------
+# ChronoPath 2.0 -- the evidence and gap layer
+#
+# Read-only, and cached on the database's modification time exactly as the
+# incident list is, so switching tabs never re-queries. Every reader returns
+# an empty list when its table is absent, which is what lets the dashboard
+# open on a 1.x database and show these tabs as empty rather than crashing.
+# ---------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def cp2_read(db_mtime, sql, params=None):
+    """Run one read-only query against the 2.0 tables."""
+    if not os.path.exists(DB_PATH):
+        return []
+    try:
+        con = duckdb.connect(DB_PATH, read_only=True)
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        rows = con.execute(sql, params or []).fetchall()
+        cols = [d[0] for d in con.description]
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception:  # noqa: BLE001
+        # The table does not exist yet -- the 2.0 layer has not been run.
+        return []
+    finally:
+        con.close()
+
+
+def cp2_has_data(db_mtime):
+    """Whether this database carries a 2.0 layer at all."""
+    return bool(cp2_read(db_mtime, "SELECT 1 FROM cp2_links LIMIT 1")
+                or cp2_read(db_mtime, "SELECT 1 FROM cp2_gaps LIMIT 1"))
+
+
+def cp2_missing_notice():
+    """One consistent message wherever the 2.0 layer has not been built."""
+    st.info(
+        "The ChronoPath 2.0 evidence layer has not been built for this "
+        "database yet. Run:\n\n"
+        f"```\npython scripts/run_cp2.py --db {os.path.basename(DB_PATH)} "
+        "--input <your log file>\n```")
 
 
 # ---------------------------------------------------------------------------
@@ -506,9 +592,14 @@ if estate:
 
 st.divider()
 
-tab_story, tab_timeline, tab_graph, tab_next, tab_hunt = st.tabs(
-    ["📝 Report", "🕐 Timeline", "🕸️ Attack graph", "🎯 What's next",
-     "🔍 Threat hunting"])
+# Tab order follows the order an analyst actually works, which is why the 2.0
+# tabs are interleaved rather than appended: understand the incident, check the
+# evidence behind it, find out what is missing, decide what to do, then hunt.
+(tab_story, tab_timeline, tab_graph, tab_evidence, tab_blind, tab_respond,
+ tab_next, tab_hunt, tab_sources) = st.tabs(
+    ["📝 Report", "🕐 Timeline", "🕸️ Attack graph", "🔗 Evidence",
+     "🕳️ What we can't see", "🚨 Respond now", "🎯 What's next",
+     "🔍 Threat hunting", "📡 Sources"])
 
 with tab_story:
     st.subheader("Incident report")
@@ -616,3 +707,479 @@ with tab_hunt:
               "Kill chain stages": ", ".join(e["kill_chain_stages"]) or "-"}
              for e in ranked[kind]],
             use_container_width=True, hide_index=True)
+
+
+# ===========================================================================
+# ChronoPath 2.0 tabs
+#
+# WHY THESE FOUR EXIST, in the order an analyst needs them:
+#
+#   Evidence           "Why do you think these events belong together?"
+#   What we can't see  "What couldn't you see, and what should I request?"
+#   Respond now        "What do I do in the next ten minutes?"
+#   Sources            "Can I trust the data underneath all of this?"
+#
+# Each is read-only over the cp2_ tables. Nothing here computes a finding --
+# they display what scripts/run_cp2.py already derived and stored, which keeps
+# the dashboard responsive on a 6.54 GB investigation and means the same facts
+# reach the API and the terminal identically.
+# ===========================================================================
+
+GRADE_HELP = {
+    "HARD": ("Strongest link available in any log: the same account acted in "
+             "both events, or one event created the account that acted in the "
+             "other. An account is the actor."),
+    "SOFT": ("Good evidence, not conclusive: a shared external address or a "
+             "shared machine inside the window. An address can be a VPN exit "
+             "or a NAT gateway used by unrelated people."),
+    "INFERRED": ("Context, not proof: attached by machine alone within 15 "
+                 "minutes, with no shared account or address."),
+    "UNRESOLVED": ("A candidate link that was REJECTED -- shared "
+                   "infrastructure or a placeholder value. Shown so the "
+                   "refusal is visible rather than silent."),
+}
+GRADE_COLOR = {"HARD": "#2e7d32", "SOFT": "#f9a825",
+               "INFERRED": "#757575", "UNRESOLVED": "#c62828"}
+
+CLASS_STYLE = {
+    "LOGGING_DISABLED_BY_ACTOR": (
+        "[!]", "An actor disabled logging AND telemetry measurably stopped."),
+    "LOGGING_DISABLED_NO_LOSS_IN_SUPPLIED_DATA": (
+        "[~]", "Logging was disabled, but this file kept recording -- so it is "
+               "likely a forwarded copy and the window is still visible."),
+    "NOT_COLLECTED": (
+        "[ ]", "This telemetry is not present in any supplied source. A fact "
+               "about our inputs, not evidence of destruction."),
+    "PARSE_FAILURE": (
+        "[?]", "Rows the reader could not use, or timestamps it could not "
+               "parse."),
+    "COVERAGE_UNKNOWN": (
+        "[-]", "We cannot tell whether this was collected. Not a claim that "
+               "it expired."),
+}
+
+
+with tab_evidence:
+    st.subheader("Why these events belong together")
+    st.caption(
+        "Union-find grouped these detections because they shared an entity "
+        "inside a time window. That is an algorithm, not an explanation. Every "
+        "link below carries the attribute it rests on, how far apart the "
+        "events were, a grade for how good that evidence is, and the original "
+        "log line."
+    )
+
+    if not CP2_AVAILABLE:
+        st.warning("The chronopath2 package could not be imported.")
+    elif not cp2_has_data(db_signature()):
+        cp2_missing_notice()
+    else:
+        sig = db_signature()
+        links = cp2_read(
+            sig,
+            "SELECT * FROM cp2_links WHERE incident_id = ? "
+            "ORDER BY CASE grade WHEN 'HARD' THEN 1 WHEN 'SOFT' THEN 2 "
+            "WHEN 'INFERRED' THEN 3 ELSE 4 END, time_delta_s",
+            [incident["id"]])
+
+        if not links:
+            # A single-detection incident has no pairs to link. Saying so
+            # explicitly beats an empty table, which reads as a failure.
+            st.info(
+                f"**{incident['id']} holds a single detection**, so there is "
+                f"no link to explain -- there is no second event to connect it "
+                f"to. It was reported on its own merit: a maximum-severity "
+                f"rule fired, and rare unambiguous signals are always reported "
+                f"however isolated. The separation statements below show what "
+                f"was checked against the other incidents."
+            )
+        else:
+            counts = {}
+            for row in links:
+                counts[row["grade"]] = counts.get(row["grade"], 0) + 1
+            metric_cols = st.columns(len(counts) or 1)
+            for col, (grade, n) in zip(metric_cols, sorted(counts.items())):
+                col.metric(f"{grade} links", n)
+
+            for row in links:
+                colour = GRADE_COLOR.get(row["grade"], "#555555")
+                mins = row["time_delta_s"] / 60.0
+                with st.expander(
+                        f"{row['grade']}  .  {row['link_attribute']} = "
+                        f"{row['attribute_value']}  .  {mins:.0f} min apart",
+                        expanded=(row["grade"] == "HARD")):
+                    st.markdown(
+                        f"<span style='color:{colour};font-weight:600'>"
+                        f"{row['grade']}</span> &mdash; "
+                        f"{GRADE_HELP.get(row['grade'], '')}",
+                        unsafe_allow_html=True)
+                    st.markdown(f"**Why:** {row['reason']}")
+                    st.caption(
+                        f"{row['event_a']}  <->  {row['event_b']}  .  "
+                        f"{row['time_delta_s']:,}s apart, within a "
+                        f"{row['window_s']:,}s window")
+
+        # Rejected candidate links -- the section most tools omit, and where an
+        # analyst should be able to overrule us.
+        rejected = cp2_read(
+            db_signature(),
+            "SELECT * FROM cp2_rejected_links WHERE incident_id = ?",
+            [incident["id"]])
+        if rejected:
+            st.divider()
+            st.markdown("#### Links we deliberately refused")
+            st.caption(
+                "Silent refusal is its own trap: an analyst cannot tell "
+                "'genuinely unrelated' from 'the tool decided not to connect "
+                "them and did not say'. These are the candidate links the "
+                "engine rejected, with the counts that triggered the refusal."
+            )
+            for row in rejected:
+                st.markdown(
+                    f"- **{row['attribute_value']}** "
+                    f"({row['link_attribute']}, {row['event_count']} events) "
+                    f"&mdash; {row['reason']}")
+
+        # Raw log lines, fetched on demand. Storing them for all 9.1 M rows
+        # would be a second copy of a 6.54 GB file to serve a few lookups.
+        st.divider()
+        st.markdown("#### Original log lines")
+        st.caption(
+            "A real investigation ends at the raw record. These are read from "
+            "the source file on request, for this incident only."
+        )
+        log_for_raw = st.text_input(
+            "Source log file",
+            value=st.session_state.get("cp2_log_path", "D:/firex-10G.log"),
+            key="cp2_raw_log")
+        if st.button("Fetch raw lines for this incident"):
+            st.session_state["cp2_log_path"] = log_for_raw
+            if not os.path.exists(log_for_raw):
+                st.error(f"Not found: {log_for_raw}")
+            else:
+                with st.spinner("Scanning the source file..."):
+                    raw_lines = cp2_links.fetch_raw_lines(log_for_raw, incident)
+                if raw_lines:
+                    st.success(f"{len(raw_lines)} line(s) found")
+                    for raw in raw_lines:
+                        st.code(raw, language="text")
+                else:
+                    st.warning(
+                        "No matching lines found. These detections may come "
+                        "from a different file than the one named above.")
+
+        # Why the incidents are separate. The honest form of a five-incident
+        # result on data whose actors genuinely share nothing.
+        sep = cp2_read(
+            db_signature(),
+            "SELECT * FROM cp2_incident_separation "
+            "WHERE incident_a = ? OR incident_b = ? ORDER BY 1, 2",
+            [incident["id"], incident["id"]])
+        if sep:
+            st.divider()
+            st.markdown(f"#### Why {incident['id']} is separate from the others")
+            st.caption(
+                "Reporting several incidents is itself a claim. These state "
+                "what was compared, so the claim can be checked rather than "
+                "trusted."
+            )
+            icons = {"NO_SHARED_ENTITY": "[ok]",
+                     "SEPARATED_BY_INFRASTRUCTURE_CUTOFF": "[infra]",
+                     "SEPARATED_BY_TIME": "[time]",
+                     "SHARED_ENTITY_PRESENT": "[!]"}
+            for row in sep:
+                other = (row["incident_b"]
+                         if row["incident_a"] == incident["id"]
+                         else row["incident_a"])
+                with st.expander(
+                        f"{icons.get(row['verdict'], '.')} vs {other} "
+                        f"&mdash; {row['verdict']}"):
+                    st.markdown(row["statement"])
+                    st.caption(
+                        f"shared accounts: {row['shared_accounts']}  .  "
+                        f"shared external IPs: {row['shared_ips']}  .  "
+                        f"rejected values: {row['shared_rejected']}")
+
+
+with tab_blind:
+    st.subheader("What we can't see")
+    st.caption(
+        "Every detection tool reports what it found. Almost none report what "
+        "they could not have found, and silence reads as 'nothing happened'. "
+        "Each gap below carries the facts that establish it, what it prevents "
+        "you concluding, and the evidence that would close it."
+    )
+
+    if not CP2_AVAILABLE:
+        st.warning("The chronopath2 package could not be imported.")
+    elif not cp2_has_data(db_signature()):
+        cp2_missing_notice()
+    else:
+        sig = db_signature()
+
+        st.info(
+            "**Missing is not malicious.** Absent logs are classified "
+            "NOT_COLLECTED or COVERAGE_UNKNOWN, never as deletion, unless a "
+            "positive event proves otherwise. Logs go missing for mundane "
+            "reasons far more often than malicious ones: the agent was never "
+            "installed, the forwarder was down, nobody licensed that source."
+        )
+
+        own = cp2_read(sig,
+                       "SELECT * FROM cp2_gaps WHERE incident_id = ? "
+                       "ORDER BY classification, gap_id", [incident["id"]])
+        st.markdown(f"#### Gaps affecting {incident['id']}")
+        if not own:
+            st.success("No incident-specific gaps recorded.")
+        for row in own:
+            icon, meaning = CLASS_STYLE.get(row["classification"], (".", ""))
+            with st.expander(
+                    f"{icon} {row['classification']} &mdash; "
+                    f"{row['telemetry']} ({row['asset_or_entity']})",
+                    expanded=True):
+                st.caption(meaning)
+                st.markdown(f"**What establishes this:** {row['basis']}")
+                st.markdown(
+                    f"**What you therefore cannot conclude:** {row['impact']}")
+                st.markdown(f"**Request next:** {row['evidence_request']}")
+                if row["time_start"] or row["time_end"]:
+                    st.caption(
+                        f"window: {row['time_start'] or 'before the file'} "
+                        f"-> {row['time_end'] or 'end of data'}")
+
+        glob = cp2_read(sig,
+                        "SELECT * FROM cp2_gaps WHERE incident_id = 'GLOBAL' "
+                        "ORDER BY classification, gap_id")
+        if glob:
+            st.divider()
+            st.markdown("#### Estate-wide gaps")
+            st.caption("Properties of the supplied data rather than of any one "
+                       "incident.")
+            for row in glob:
+                icon, meaning = CLASS_STYLE.get(row["classification"], (".", ""))
+                with st.expander(f"{icon} {row['classification']} &mdash; "
+                                 f"{row['telemetry']}"):
+                    st.caption(meaning)
+                    st.markdown(f"**What establishes this:** {row['basis']}")
+                    st.markdown(
+                        f"**What you therefore cannot conclude:** "
+                        f"{row['impact']}")
+                    st.markdown(f"**Request next:** {row['evidence_request']}")
+
+        # The blind window against measured volume. Shading the window is the
+        # clearest way to show whether anything actually stopped arriving.
+        blind = [row for row in own
+                 if row["classification"].startswith("LOGGING_DISABLED")]
+        if blind:
+            st.divider()
+            st.markdown("#### The blind window, against measured log volume")
+            for row in blind:
+                st.markdown(f"**{row['time_start']} -> {row['time_end']}** "
+                            f"({row['classification']})")
+                wider = cp2_read(
+                    sig,
+                    "SELECT hour_bucket, SUM(event_count) AS events "
+                    "FROM cp2_stream_volume GROUP BY 1 ORDER BY 1")
+                if wider:
+                    start_s = str(row["time_start"])
+                    end_s = str(row["time_end"])
+                    chart = []
+                    for v in wider:
+                        hb = str(v["hour_bucket"])
+                        inside = start_s[:13] <= hb[:13] <= end_s[:13]
+                        chart.append({
+                            "hour": hb,
+                            "events": v["events"],
+                            "in blind window": v["events"] if inside else 0,
+                        })
+                    st.caption(
+                        "The second series marks the window. If it reaches the "
+                        "same height as the first, nothing stopped arriving."
+                    )
+                    st.bar_chart(chart, x="hour",
+                                 y=["events", "in blind window"])
+
+
+with tab_respond:
+    st.subheader("Respond now")
+    st.caption(
+        "Indicators, whether it is still happening, what preceded it, and "
+        "recommended containment. Every indicator is looked up across the "
+        "whole data set rather than inside the incident -- an incident's end "
+        "time is the last time these detections fired, not the last time the "
+        "attacker was seen."
+    )
+
+    if not CP2_AVAILABLE:
+        st.warning("The chronopath2 package could not be imported.")
+    elif not cp2_has_data(db_signature()):
+        cp2_missing_notice()
+    else:
+        sig = db_signature()
+        inds = cp2_read(sig,
+                        "SELECT * FROM cp2_indicators WHERE incident_id = ? "
+                        "ORDER BY indicator_type, value", [incident["id"]])
+
+        st.markdown("#### Indicators")
+        if inds:
+            st.dataframe(
+                [{"Type": row["indicator_type"],
+                  "Value": row["value"],
+                  "First seen (whole data set)": row["first_seen"],
+                  "Last seen (whole data set)": row["last_seen"],
+                  "Detections": row["occurrences"],
+                  "Note": row["note"] or ""} for row in inds],
+                use_container_width=True, hide_index=True)
+
+            still = [row for row in inds
+                     if (row["note"] or "").startswith("STILL ACTIVE")]
+            if still:
+                st.error(
+                    f"**{len(still)} indicator(s) were seen AFTER this "
+                    f"incident's last event. This is not over:** "
+                    + ", ".join(row["value"] for row in still))
+            else:
+                st.success(
+                    "No indicator from this incident appears after its last "
+                    "event anywhere in the supplied data. Nothing here "
+                    "suggests the activity continued -- within the limits of "
+                    "what we were given."
+                )
+
+            st.text_area("Copyable indicator list",
+                         "\n".join(row["value"] for row in inds), height=110)
+        else:
+            st.info("No indicators recorded for this incident.")
+
+        # Preceding access: how did they get in?
+        st.divider()
+        st.markdown("#### What preceded the first detection")
+        ledger = cp2_read(sig,
+                          "SELECT * FROM cp2_gaps WHERE incident_id = ?",
+                          [incident["id"]])
+        pre_con = duckdb.connect(DB_PATH, read_only=True)
+        try:
+            pre = cp2_respond.preceding_access(
+                pre_con, incident, parse_ts=graph_engine._parse_ts)
+        finally:
+            pre_con.close()
+        st.markdown(pre["summary"])
+        if pre["rows"]:
+            st.dataframe(
+                [{"Time": row["timestamp"], "Account": row["user"],
+                  "Source IP": row["src_ip"], "Rule": row["rule_name"],
+                  "Technique": row["mitre_technique"],
+                  "Outcome": row["outcome"], "Raw events": row["raw"]}
+                 for row in pre["rows"][:60]],
+                use_container_width=True, hide_index=True)
+
+        # Recommended actions.
+        st.divider()
+        st.markdown("#### Recommended actions")
+        st.caption(
+            "Rule-based, selected by conditions observed in the data -- not "
+            "written by the language model. Containment advice should not "
+            "vanish when an API key expires, and should not be improvised by a "
+            "model when someone may run it on production infrastructure. "
+            "**Nothing here has been done or automated.**"
+        )
+        actions = cp2_respond.suggested_actions(incident, ledger)
+        order = {"immediate": 0, "high": 1, "standard": 2, "follow-up": 3}
+        badges = {"immediate": "IMMEDIATE", "high": "HIGH",
+                  "standard": "STANDARD", "follow-up": "FOLLOW-UP"}
+        for act in sorted(actions, key=lambda a: order.get(a["priority"], 9)):
+            with st.expander(
+                    f"[{badges.get(act['priority'], act['priority'])}] "
+                    f"{act['observation']}", expanded=True):
+                st.caption(f"Status: **{act['status']}** -- nothing automated")
+                for step in act["steps"]:
+                    st.markdown(f"- {step}")
+
+
+with tab_sources:
+    st.subheader("Can I trust this data?")
+    st.caption(
+        "Provenance and coverage for every input. The first question about any "
+        "finding is whether the data underneath it is sound; without this the "
+        "answer is unfalsifiable."
+    )
+
+    if not CP2_AVAILABLE:
+        st.warning("The chronopath2 package could not be imported.")
+    else:
+        sig = db_signature()
+        fps = cp2_read(sig,
+                       "SELECT * FROM cp2_source_fingerprint "
+                       "ORDER BY recorded_at")
+        if not fps:
+            st.info(
+                "No coverage pass has been run for this database. Run:\n\n"
+                f"```\npython scripts/build_coverage.py --input <log> --db "
+                f"{os.path.basename(DB_PATH)}\n```")
+        for fp in fps:
+            st.markdown(f"#### {fp['source']}")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Format", fp["detected_format"])
+            c2.metric("Events", f"{fp['total_rows']:,}")
+            c3.metric("Streams", fp["streams_found"])
+            c4.metric("Size", f"{(fp['size_bytes'] or 0) / 1024 ** 3:.2f} GB")
+
+            st.caption(f"**Time range:** {fp['earliest_ts']} -> "
+                       f"{fp['latest_ts']}")
+            st.caption(f"**Timestamp field used:** {fp['timestamp_field']}")
+            st.caption(f"**SHA-256:** `{fp['sha256']}`")
+            st.caption(
+                "The digest pins the exact bytes these findings came from. A "
+                "filename is not reproducible; a hash is.")
+
+            bad = int(fp["bad_timestamp_rows"] or 0)
+            rej = int(fp["rejected_rows"] or 0)
+            if bad or rej:
+                st.warning(
+                    f"{rej:,} row(s) rejected and {bad:,} with an unparseable "
+                    f"timestamp. These are flagged, not silently sorted to the "
+                    f"start of the timeline -- see the gap ledger.")
+            else:
+                st.success(
+                    "Every row was read and carried a parseable timestamp.")
+
+            # The clock note. This single field is what prevents a silent
+            # five-and-a-half-hour error on the organisers' data.
+            st.info(f"**Clock check:** {fp['clock_note']}")
+
+            rows = cp2_read(sig,
+                            "SELECT stream, SUM(event_count) AS events, "
+                            "MIN(hour_bucket) AS first_hour, "
+                            "MAX(hour_bucket) AS last_hour, "
+                            "COUNT(*) AS active_hours "
+                            "FROM cp2_stream_volume WHERE source = ? "
+                            "GROUP BY 1 ORDER BY events DESC", [fp["source"]])
+            if rows:
+                total = sum(r["events"] for r in rows) or 1
+                st.markdown("**Telemetry streams**")
+                st.caption(
+                    "A FortiGate log is not one source -- it multiplexes "
+                    "independent subsystems, each with its own coverage. That "
+                    "is what makes a per-stream outage visible even from a "
+                    "single supplied file."
+                )
+                st.dataframe(
+                    [{"Stream": r["stream"],
+                      "Events": f"{r['events']:,}",
+                      "Share": f"{r['events'] / total * 100:.2f}%",
+                      "Active hours": r["active_hours"],
+                      "First": str(r["first_hour"]),
+                      "Last": str(r["last_hour"])} for r in rows],
+                    use_container_width=True, hide_index=True)
+
+                vol = cp2_read(sig,
+                               "SELECT hour_bucket, SUM(event_count) AS events "
+                               "FROM cp2_stream_volume WHERE source = ? "
+                               "GROUP BY 1 ORDER BY 1", [fp["source"]])
+                if vol:
+                    st.markdown("**Event volume over the whole file**")
+                    st.caption("A steady line means steady collection. A cliff "
+                               "means something stopped sending.")
+                    st.bar_chart(
+                        [{"hour": str(v["hour_bucket"]), "events": v["events"]}
+                         for v in vol], x="hour", y="events")
