@@ -1,0 +1,88 @@
+{
+  "incident": "EDR-INC-01",
+  "source": "data/edr_ready.json (ECS JSON from the organisers' edr_log_generator.py)",
+  "how_this_was_derived": "Recovered from the detections in edr.db after data/ground_truth.json was accidentally overwritten by scripts/generate_sample.py, which used to write the same filename. The planted steps are identifiable because they were INJECTED on exact minute boundaries (seconds = 00) while the generator's background noise carries random seconds: 11 events on this day sit on an exact minute, and they are these 8 steps plus a duplicate T1110 row and a T1105 companion to the exfiltration. Cross-checked against the attack chain prepare_edr.py plants. The two generators now write ground_truth_edr.json and ground_truth_flat.json so the collision cannot recur.",
+  "description": "Phishing macro on a finance workstation -> C2 beacon -> autorun persistence -> brute force against the domain controller -> a new domain account created -> that account used on the file server -> exfiltration -> ransomware.",
+  "steps": [
+    {
+      "step": 1,
+      "stage": "Execution",
+      "technique": "T1059.001",
+      "technique_name": "Command and Scripting Interpreter: PowerShell",
+      "timestamp": "2026-10-22T20:24:00.000Z",
+      "host": "WS-FIN-012",
+      "user": "rkumar",
+      "evidence": "Office application spawned a scripting engine -- the macro foothold"
+    },
+    {
+      "step": 2,
+      "stage": "Command and Control",
+      "technique": "T1071.001",
+      "technique_name": "Application Layer Protocol: Web Protocols",
+      "timestamp": "2026-10-22T20:27:00.000Z",
+      "host": "WS-FIN-012",
+      "user": "rkumar",
+      "evidence": "Beaconing to a low-reputation destination, 3 minutes after execution"
+    },
+    {
+      "step": 3,
+      "stage": "Persistence",
+      "technique": "T1547.001",
+      "technique_name": "Boot or Logon Autostart Execution: Registry Run Keys",
+      "timestamp": "2026-10-22T20:39:00.000Z",
+      "host": "WS-FIN-012",
+      "user": "rkumar",
+      "evidence": "Autorun key created by the scripting engine"
+    },
+    {
+      "step": 4,
+      "stage": "Credential Access",
+      "technique": "T1110",
+      "technique_name": "Brute Force",
+      "timestamp": "2026-10-22T21:03:00.000Z",
+      "host": "SRV-DC-01",
+      "user": "administrator",
+      "evidence": "High rate of failed logons against the domain controller"
+    },
+    {
+      "step": 5,
+      "stage": "Persistence",
+      "technique": "T1136.002",
+      "technique_name": "Create Account: Domain Account",
+      "timestamp": "2026-10-22T21:09:00.000Z",
+      "host": "SRV-DC-01",
+      "user": "rkumar",
+      "evidence": "rkumar creates svc_helpdesk -- the identity pivot that carries the chain"
+    },
+    {
+      "step": 6,
+      "stage": "Defense Evasion",
+      "technique": "T1078.003",
+      "technique_name": "Valid Accounts: Local Accounts",
+      "timestamp": "2026-10-22T21:12:00.000Z",
+      "host": "SRV-DC-01",
+      "user": "svc_helpdesk",
+      "evidence": "The new service account logs on interactively, 3 minutes after creation"
+    },
+    {
+      "step": 7,
+      "stage": "Exfiltration",
+      "technique": "T1041",
+      "technique_name": "Exfiltration Over C2 Channel",
+      "timestamp": "2026-10-22T21:38:00.000Z",
+      "host": "SRV-FILE-01",
+      "user": "svc_helpdesk",
+      "evidence": "Large outbound transfer from the file server (58.8 MB)"
+    },
+    {
+      "step": 8,
+      "stage": "Impact",
+      "technique": "T1486",
+      "technique_name": "Data Encrypted for Impact",
+      "timestamp": "2026-10-22T22:03:00.000Z",
+      "host": "SRV-FILE-01",
+      "user": "svc_helpdesk",
+      "evidence": "Rapid mass file rename -- ransomware behaviour"
+    }
+  ]
+}

@@ -41,7 +41,7 @@ import graph_engine  # noqa: E402
 MATCH_WINDOW_MINUTES = 30
 
 
-def load_truth(path="data/ground_truth.json"):
+def load_truth(path="data/ground_truth_flat.json"):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -65,7 +65,8 @@ def _matches(step, det):
         abs((a - b).total_seconds()) <= MATCH_WINDOW_MINUTES * 60
 
 
-def evaluate(db_path="chronopath.db", truth_path="data/ground_truth.json"):
+def evaluate(db_path="chronopath.db",
+             truth_path="data/ground_truth_flat.json"):
     truth = load_truth(truth_path)
     planted = truth["steps"]
 
@@ -191,7 +192,11 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="chronopath.db")
-    ap.add_argument("--truth", default="data/ground_truth.json")
+    # Defaults pair with the default --db (chronopath.db, the flat sample).
+    # Each data set has its OWN truth file -- ground_truth_flat.json,
+    # ground_truth_edr.json, ground_truth_firex.json -- because two generators
+    # once shared one filename and silently overwrote each other's answer key.
+    ap.add_argument("--truth", default="data/ground_truth_flat.json")
     args = ap.parse_args()
     if not os.path.exists(args.truth):
         raise SystemExit("No ground truth. Run scripts/generate_sample.py first.")

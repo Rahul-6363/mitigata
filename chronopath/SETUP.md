@@ -408,7 +408,110 @@ If you regenerate the flat sample and then want to re-score the EDR run, re-run
 
 ## 9 · Checking everything works
 
-Run this to confirm a healthy install. All four metrics should read `GREAT`:
+### The one command
+
+```bash
+python verify.py
+```
+
+That is the whole test. It runs five groups of checks and prints PASS, FAIL or
+SKIP for each, with the reason:
+
+```
+1. Python syntax          all 24 Python files parse
+2. Detection rules        3 rule files load, 31 rules, 1 documented-but-off
+3. Test suite             16 tests, including the regression gate
+4. Accuracy vs ground truth   FortiGate and EDR, each against ITS OWN key
+5. Independent validation     the numbers we did not grade ourselves
+```
+
+Expected output when everything is in place:
+
+```
+  [PASS] all 24 Python files parse
+  [PASS] rules_fortigate.yaml  14 rules, 13 enabled, 1 documented-but-off
+  [PASS] test suite  all 16 passed
+  [PASS] FortiGate (the organisers' real 6.5 GB file)  373,239 detections ->
+         5 incidents, 100.0% detection, 100.0% labels, 0.0% false alarms
+  [PASS] EDR / ECS (the organisers' generator)  26,119 detections ->
+         1 incidents, 100.0% detection, 100.0% labels, 0.0% false alarms
+  [PASS] label precision vs vendor signatures  100.0% (0 disagreements)
+  [PASS] hold-out detection  100.0% of detections from techniques outside
+         our answer key
+
+  ALL CHECKS PASSED -- 9 of 9
+```
+
+**Why this script exists.** Testing used to mean five commands with the right
+`--db` and `--truth` pairings, and getting a pairing wrong produces the most
+misleading failure in this project: 0% detection with 100% false alarms, as
+though the detector were broken, when it is being graded against another data
+set's answer key. The pairings now live in `verify.py` instead of in your head.
+
+**SKIP is not FAIL.** The script checks its own prerequisites and skips what it
+cannot run, saying why. On a machine without the 6.5 GB source log, almost
+everything still runs:
+
+```bash
+python verify.py --quick                      # skip the independent validation
+python verify.py --log E:/firex-10G.log       # log in a non-standard place
+```
+
+### Testing one thing at a time
+
+If `verify.py` reports a failure, these are the individual commands behind it:
+
+| What | Command |
+|---|---|
+| The test suite | `python tests/test_chronopath2.py` |
+| FortiGate accuracy | `python scripts/evaluate.py --db firex.db --truth data/ground_truth_firex.json` |
+| EDR accuracy | `python scripts/evaluate.py --db edr.db --truth data/ground_truth_edr.json` |
+| Flat-sample accuracy | `python scripts/evaluate.py --db chronopath.db --truth data/ground_truth_flat.json` |
+| Independent validation | `python scripts/validate_independent.py --db firex.db --input <log>` |
+| The remove-a-host experiment | `python scripts/experiment_remove_host.py` |
+
+**Each data set has its own answer key.** This is not optional bookkeeping:
+
+| Input | Database | Answer key |
+|---|---|---|
+| `firex-10G.log` | `firex.db` | `data/ground_truth_firex.json` |
+| `data/edr_ready.json` | `edr.db` | `data/ground_truth_edr.json` |
+| Flat sample | `chronopath.db` | `data/ground_truth_flat.json` |
+
+### Rebuilding from scratch
+
+If a database is missing, rebuild it and then re-verify:
+
+```bash
+# FortiGate: detection, then the evidence layer
+python src/parser.py --input firex-10G.log --db firex.db --memory-limit 6GB
+python scripts/run_cp2.py --db firex.db --input firex-10G.log
+
+# EDR
+python src/parser.py --input data/edr_ready.json --db edr.db
+python scripts/run_cp2.py --db edr.db --input data/edr_ready.json
+
+python verify.py
+```
+
+Note that `src/parser.py` **rewrites** the database, which drops the `cp2_`
+tables — so always re-run `run_cp2.py` after a re-parse. `verify.py` will tell
+you if you forget.
+
+### Seeing it, not just testing it
+
+```bash
+streamlit run src/app.py        # 9 tabs; set CHRONOPATH_DB=firex.db to pick the data
+python src/api.py               # REST API on :8000
+curl http://localhost:8000/gaps/1        # what we cannot tell you about INC-01
+curl http://localhost:8000/evidence/1    # why INC-01's events belong together
+```
+
+### The end-to-end demo run
+
+Separately from `verify.py`, this runs the whole flat-sample pipeline from
+generation to scoring -- useful as a live demo because it starts from nothing.
+All four metrics should read `GREAT`:
 
 ```bash
 python run_demo.py
@@ -473,6 +576,7 @@ chronopath/
 ├── rules_ecs.yaml         Rules for the EDR generator's ECS format
 ├── rules_fortigate.yaml   Rules for real FortiGate syslog
 ├── assets.yaml            Host/privilege inventory (powers look-ahead — FR-6)
+├── verify.py              ONE COMMAND TO TEST EVERYTHING
 ├── run_demo.py            Runs the whole pipeline in one command
 ├── data/                  Generated logs + ground truth (gitignored)
 ├── docs/                                                             ← 2.0

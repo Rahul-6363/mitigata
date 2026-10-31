@@ -560,9 +560,18 @@ def test_every_input_byte_is_accounted_for():
     except ImportError:
         _skip("validate_independent.py not importable")
         return
-    log = os.environ.get("CHRONOPATH_LOG", "D:/firex-10G.log")
-    if not os.path.exists(log):
-        _skip(f"{log} not present")
+    # Look where the log actually tends to live, rather than assuming one
+    # path. It has moved between D:\ and the project folder during this work,
+    # and a test that reports "not present" for a file sitting next to it is
+    # worse than useless -- it reads as a missing prerequisite when the real
+    # problem is a hard-coded path.
+    candidates = [os.environ.get("CHRONOPATH_LOG"),
+                  os.path.join(ROOT, "firex-10G.log"),
+                  "D:/firex-10G.log",
+                  os.path.join(ROOT, "data", "firex-10G.log")]
+    log = next((p for p in candidates if p and os.path.exists(p)), None)
+    if not log:
+        _skip("firex-10G.log not found (set CHRONOPATH_LOG to point at it)")
         return
     acct = account_for_input(log)
     if acct["trailing_bytes"] > 0:

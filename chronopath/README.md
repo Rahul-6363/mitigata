@@ -31,11 +31,16 @@ that, with a measurement, rather than guess either way — see
 ## 🔥 On the real data set (`firex-10G.log`)
 
 ```bash
-python src/parser.py --input D:/firex-10G.log --db firex.db --memory-limit 6GB
-python scripts/run_cp2.py --db firex.db --input D:/firex-10G.log   # evidence + gaps
-python scripts/evaluate.py --db firex.db --truth data/ground_truth_firex.json
+python src/parser.py --input firex-10G.log --db firex.db --memory-limit 6GB
+python scripts/run_cp2.py --db firex.db --input firex-10G.log   # evidence + gaps
+python verify.py                # ONE command: tests + accuracy + independent checks
 streamlit run src/app.py        # or: python src/api.py
 ```
+
+**To test the whole project, `python verify.py` is the only command you need.**
+It runs the 16-test suite, scores both data sets against their own answer keys,
+and reports the independent accuracy numbers — printing PASS, FAIL or SKIP with
+the reason for each. See [SETUP.md § 9](SETUP.md).
 
 Format is detected automatically — it is FortiGate firewall syslog, a third
 format alongside our flat JSON and the EDR generator's ECS JSON.
@@ -627,6 +632,7 @@ chronopath/
 ├── rules_ecs.yaml         Detection rules, EDR generator ECS format
 ├── rules_fortigate.yaml   Detection rules, real FortiGate syslog
 ├── assets.yaml            Host/privilege inventory           (FR-6)
+├── verify.py              One command to test everything
 ├── run_demo.py            Whole pipeline in one command
 ├── data/                  Generated logs + ground truth (gitignored)
 ├── docs/

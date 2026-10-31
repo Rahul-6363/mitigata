@@ -40,7 +40,7 @@ produces every log line; we only make the stream realistic:
 
   * PLANTS A CORRELATED ATTACK (INC-01) using the generator's OWN event shapes
     and techniques -- one actor, one account, moving across hosts over hours.
-    Writes `ground_truth.json` so accuracy can be measured.
+    Writes `ground_truth_edr.json` so accuracy can be measured.
 
 IS THIS CHEATING? No, and it is worth being able to answer that crisply.
 We are not making the detection easier: the planted attack uses the same five
@@ -377,8 +377,17 @@ def main():
     print(f"  wrote {written:,} events  ({size_mb:.1f} MB)")
 
     if truth:
+        # ground_truth_EDR.json, not ground_truth.json.
+        #
+        # This script and scripts/generate_sample.py both used to write
+        # `ground_truth.json`, so running one silently destroyed the other's
+        # answer key. The symptom was alarming and completely misleading:
+        # evaluate.py reported 0% detection with 100% false alarms, as though
+        # the detector had broken, when in fact it was grading the EDR database
+        # against the flat sample's planted attack. Separate filenames make
+        # that collision impossible.
         tp = os.path.join(os.path.dirname(args.output) or ".",
-                          "ground_truth.json")
+                          "ground_truth_edr.json")
         with open(tp, "w", encoding="utf-8") as f:
             json.dump({"incident": "INC-01",
                        "description": "Phishing -> C2 -> persistence -> brute "

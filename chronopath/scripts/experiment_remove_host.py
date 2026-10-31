@@ -211,7 +211,8 @@ def main():
     ap = argparse.ArgumentParser(
         description="Remove one host from the EDR input and measure the effect.")
     ap.add_argument("--input", default=os.path.join(root, "data", "edr_ready.json"))
-    ap.add_argument("--truth", default=os.path.join(root, "data", "ground_truth.json"))
+    ap.add_argument("--truth",
+                    default=os.path.join(root, "data", "ground_truth_edr.json"))
     ap.add_argument("--baseline-db", default=os.path.join(root, "edr.db"))
     ap.add_argument("--reduced-db", default=os.path.join(root, "edr_removed.db"))
     ap.add_argument("--reduced-input", default=None)

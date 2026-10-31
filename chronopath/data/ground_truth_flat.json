@@ -1,0 +1,70 @@
+{
+  "incident": "INC-01",
+  "description": "Stolen vendor credential -> data theft",
+  "steps": [
+    {
+      "step": 1,
+      "stage": "Initial Access",
+      "technique": "T1078",
+      "timestamp": "2026-10-20T12:55:23.147000",
+      "host": "HR-07",
+      "user": "svc_vendor_hvac"
+    },
+    {
+      "step": 2,
+      "stage": "Credential Access",
+      "technique": "T1110",
+      "timestamp": "2026-10-20T12:58:47.147000",
+      "host": "HR-07",
+      "user": "admin_jane"
+    },
+    {
+      "step": 3,
+      "stage": "Credential Access",
+      "technique": "T1003.001",
+      "timestamp": "2026-10-20T13:00:47.147000",
+      "host": "HR-07",
+      "user": "admin_jane"
+    },
+    {
+      "step": 4,
+      "stage": "Privilege Escalation",
+      "technique": "T1136",
+      "timestamp": "2026-10-20T13:04:47.147000",
+      "host": "HR-07",
+      "user": "svc_helpdesk_adm"
+    },
+    {
+      "step": 5,
+      "stage": "Privilege Escalation",
+      "technique": "T1078.003",
+      "timestamp": "2026-10-20T13:05:17.147000",
+      "host": "HR-07",
+      "user": "svc_helpdesk_adm"
+    },
+    {
+      "step": 6,
+      "stage": "Lateral Movement",
+      "technique": "T1021.002",
+      "timestamp": "2026-10-20T13:11:17.147000",
+      "host": "FS-02",
+      "user": "svc_helpdesk_adm"
+    },
+    {
+      "step": 7,
+      "stage": "Collection",
+      "technique": "T1005",
+      "timestamp": "2026-10-20T13:14:14.147000",
+      "host": "FS-02",
+      "user": "svc_helpdesk_adm"
+    },
+    {
+      "step": 8,
+      "stage": "Exfiltration",
+      "technique": "T1041",
+      "timestamp": "2026-10-20T13:22:14.147000",
+      "host": "FS-02",
+      "user": "svc_helpdesk_adm"
+    }
+  ]
+}

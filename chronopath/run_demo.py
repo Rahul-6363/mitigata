@@ -69,7 +69,7 @@ def main():
     run(["src/graph_engine.py"])
 
     step(4, "Score accuracy against ground truth")
-    truth = os.path.join(ROOT, "data", "ground_truth.json")
+    truth = os.path.join(ROOT, "data", "ground_truth_flat.json")
     if os.path.exists(truth):
         run(["scripts/evaluate.py"])
     else:

@@ -12,12 +12,12 @@ Two reasons, both practical:
 2. WE GET GROUND TRUTH. The PRD scores us on "share of planted attack steps your
    tool finds". To measure recall you must know the right answer in advance. This
    script plants a specific 7-step attack (INC-01) and writes the answer key to
-   ground_truth.json. evaluate.py then grades the detector against it.
+   ground_truth_flat.json. evaluate.py then grades the detector against it.
 
 WHAT IT WRITES
 --------------
   data/sample.ndjson      newline-delimited JSON, one log event per line
-  data/ground_truth.json  the planted attack steps, for scoring
+  data/ground_truth_flat.json  the planted attack steps, for scoring
 
 WHY NDJSON (one JSON object per line) rather than one big JSON array?
 A 15 GB JSON array must be parsed as a single document -- the parser cannot know
@@ -258,7 +258,12 @@ def main():
             f.write(json.dumps(rec) + "\n")
         del batch
 
-    truth_path = os.path.join(os.path.dirname(args.out) or ".", "ground_truth.json")
+    # ground_truth_FLAT.json, not ground_truth.json -- see the note in
+    # scripts/prepare_edr.py. Both scripts used to write the same filename, so
+    # running one destroyed the other's answer key and produced a 0%-detection
+    # report that looked like a broken detector rather than a mismatched exam.
+    truth_path = os.path.join(os.path.dirname(args.out) or ".",
+                              "ground_truth_flat.json")
     with open(truth_path, "w", encoding="utf-8") as f:
         json.dump({"incident": "INC-01",
                    "description": "Stolen vendor credential -> data theft",
