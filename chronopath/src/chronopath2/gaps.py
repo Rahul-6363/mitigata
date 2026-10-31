@@ -412,7 +412,80 @@ def incident_gaps(con, incident, sources=None):
                 entity=subject),
         })
 
-    # 3. Identity-provider corroboration for external administrative access.
+    # 3. AN ACTOR WITH NO ORIGIN IN SCOPE.
+    #
+    # This is the gap that catches a missing host, and it is the one the Task 6
+    # experiment proved necessary. Remove SRV-DC-01 from the EDR data and
+    # svc_helpdesk still turns up on the file server exfiltrating data -- but
+    # the record of rkumar CREATING svc_helpdesk went with the domain
+    # controller. So the output showed an account appearing from nowhere, and
+    # the first version of this ledger said nothing about it.
+    #
+    # An unexplained actor is a reportable hole, not a curiosity. A service
+    # account that first appears mid-intrusion either was created by someone we
+    # cannot see, or existed all along and we lack its history. Either way the
+    # analyst cannot answer "how did this account get here?", and that is worth
+    # stating.
+    #
+    # Deliberately NOT called deletion or tampering (ground rule 5). The honest
+    # classification is NOT_COLLECTED: the explaining telemetry is not in what
+    # we were given.
+    service_like = []
+    for acct in accounts:
+        low = acct.lower()
+        if not (low.startswith(("svc", "svc_", "service")) or "admin" in low):
+            continue
+        # Is there anything in THIS incident explaining where the account came
+        # from? A creation event naming it, by any format.
+        explained = any(
+            re.search(rf"\b(add|create[d]?|net\s+user)\b[^\n]*\b{re.escape(acct)}\b",
+                      f"{e.get('raw_msg') or ''} {e.get('message') or ''}",
+                      re.IGNORECASE)
+            for e in events)
+        if not explained:
+            service_like.append(acct)
+
+    if service_like:
+        subject = ", ".join(service_like[:4])
+        # Where the account is first seen acting, which is the moment the
+        # analyst needs the missing history for.
+        first_use = min(
+            (e["timestamp"] for e in events
+             if str(e.get("user") or "").strip() in service_like),
+            default=start)
+        out.append({
+            "gap_id": f"{inc_id}-GAP-ACTOR-ORIGIN",
+            "incident_id": inc_id,
+            "asset_or_entity": subject,
+            "telemetry": "identity_provider",
+            "time_start": None, "time_end": first_use,
+            "classification": "NOT_COLLECTED",
+            "basis": (
+                f"The account(s) {subject} act in this incident from "
+                f"{first_use}, but nothing in the supplied data records where "
+                f"they came from -- no creation event, and no earlier activity "
+                f"establishing them as pre-existing. The host or log source "
+                f"that would carry that record is not among the sources "
+                f"provided."
+            ),
+            "impact": (
+                f"Cannot establish whether {subject} was created by the "
+                f"attacker during this intrusion or is a legitimate "
+                f"pre-existing account that was compromised. These call for "
+                f"opposite responses -- delete versus reset -- so the "
+                f"distinction matters before containment. The chain of custody "
+                f"from the initial foothold to this account is broken here."
+            ),
+            "evidence_request": (
+                f"Directory or endpoint audit records covering the creation "
+                f"and prior activity of {subject}, and the process telemetry "
+                f"from whichever host created it. If a domain controller is "
+                f"missing from the supplied sources, that is the host to "
+                f"request first."
+            ),
+        })
+
+    # 4. Identity-provider corroboration for external administrative access.
     external_auth = [e for e in events
                      if str(e.get("mitre_technique") or "").startswith(
                          ("T1078", "T1133"))]
