@@ -81,8 +81,8 @@ python scripts/evaluate.py --db firex.db --truth data/ground_truth_firex.json
 
 | Metric | Result | PRD bar |
 |---|---|---|
-| **Detection rate** | **100%** | >90% = Great |
-| **Correct ATT&CK labels** | **100%** | >85% = Great |
+| **Detection rate** | **100%** ⚠️ | >90% = Great |
+| **Correct ATT&CK labels** | **100%** ⚠️ | >85% = Great |
 | **False alarm rate** | **0%** | <10% = Great |
 | Open one incident | **4 ms** | <500 ms = Great |
 | Peak memory, detection | **813 MB** | <8 GB = Great |
@@ -90,13 +90,117 @@ python scripts/evaluate.py --db firex.db --truth data/ground_truth_firex.json
 | Events processed | **9,125,382** | — |
 | Detections → incidents | **373,061 → 5** | — |
 
-**All four PRD accuracy metrics at the "Great" bar, on the real file.**
+All four PRD accuracy metrics at the "Great" bar — **and we will tell you
+ourselves why two of them deserve an asterisk.**
+
+### ⚠️ The honest caveat, before you ask for it
+
+The organisers gave us this file with **no answer key**. So we derived one by
+rarity analysis (`scripts/discover_firex.py`) and then wrote rules to find
+those events. The detection and labelling metrics therefore measure *"do the
+rules we wrote find the things we wrote them for?"* — six of our twelve rules
+map 1:1 onto the eight ground-truth steps.
+
+We built a second scorer that cannot be gamed that way
+(`scripts/validate_independent.py`). These are the numbers we will defend:
+
+| Independent measurement | Result | Why it is independent |
+|---|---|---|
+| Detections from techniques **outside** our answer key | **99.997%** | Hold-out: 373,051 of 373,061 |
+| Label precision vs **Fortinet's own signature names** | **100%** — 229,757 checked, **0** disagree | Fortinet wrote those strings, not us |
+| Real threats left UNMAPPED | **0** | — |
+| Coverage of real IPS signatures | **96%** (23/24) | Measured against the data's vocabulary |
+| Coverage of antivirus signatures | **100%** (35/35) | Same |
+| Input bytes accounted for | **100%** | 26% proved to be random padding |
+| True **false-negative** rate on real intrusions | **unknown** | ❌ Needs labelled real data. Nobody has given us any. |
+
+**This check paid for itself immediately — it found two real mislabels in our
+own largest detection categories.** See the next section.
+
+Full reasoning, including everything we cannot prove:
+**[`docs/ACCURACY.md`](docs/ACCURACY.md)**
+
+### 🔍 The independent check found two real errors in our own work
+
+Checking our ATT&CK labels against Fortinet's signature names caught two
+mislabels in the **two largest detection categories we produce** — 190,186
+detections, which the headline 100% metric was completely blind to.
+
+**1. Antivirus: `T1105` → `T1566`, "Execution" → "Delivery"** (135,623 detections)
+
+Wrong on both axes, for two independent reasons:
+
+- T1105 *(Ingress Tool Transfer)* describes an attacker who **already has
+  access** pulling tooling onto a host they control. Antivirus intercepting a
+  file at the perimeter is the delivery attempt itself.
+- **"Execution" is contradicted by the data:** 135,620 of the 135,623 carry
+  `action="blocked"`. The file never ran. Labelling it Execution tells an
+  analyst a host was compromised *when the control worked* — a false sense of
+  breach, 135,000 times over.
+
+**2. App control: `T1071.001` → `UNMAPPED`** (54,563 detections)
+
+Labelled *Command and Control*. Then we looked at which applications FortiGate
+actually rates critical:
+
+```
+KakaoTalk, Instagram, Basecamp, GoogleHangouts, OneDrive,
+Skype, Dropbox, GitLab, Telegram, Tinder, Chocolatey, SSH
+```
+
+Consumer software. Someone opening Instagram at work is a policy matter, not C2
+infrastructure. That was **54,563 false C2 findings** sending an analyst to hunt
+a beacon that never existed.
+
+**Both fixes left the regression gate untouched** (5 incidents, 100%/100%/0%),
+because they corrected *background noise* labelling rather than the planted
+attack. That is the point worth taking away: **a metric that cannot see its own
+largest error is not a metric to trust alone.** Which is why we built the second
+one.
+
+### 🔇 And one rule we wrote, measured, and switched off
+
+The coverage check reports **0% of the webfilter stream** — 408,635 events in
+categories named `Botnet`, `Ransomware`, `Phishing`, 90% of them *allowed*
+rather than blocked. The largest apparent blind spot in the pipeline.
+
+So we wrote the rule and measured whether enabling it would help:
+
+| Measurement | Result |
+|---|---|
+| Internal hosts involved | **1,386** |
+| Events per host | min 18, median 36, max 59 (mean 36.2, σ 6.1) |
+| Worst host | **3.71σ** — exactly what the max of 1,386 noise samples looks like |
+| Hosts we already detect on that appear here | **1,386 of 1,388** |
+| Known attacker addresses in webfilter | **0** |
+
+Uniform synthetic background. Enabling it would add ~368,000 detections and
+over a thousand single-host incidents, taking the false-alarm rate from **0% to
+~99%**, and find **no additional attacker**.
+
+It ships `enabled: false` with those measurements recorded beside it in the
+YAML. On a real estate this is a rule you *want* — one word turns it on. We
+verified it fires correctly when the threshold is reachable, so it is documented
+config, not dead config.
 
 ### Scale, honestly
 
 Memory is **flat**, not proportional to the file — that is the whole point of
 streaming. 6.54 GB processed in 813 MB means 15 GB should cost more *time*, not
 more memory. We say "should" because we measured 6.54 GB and did not measure 15.
+
+### And one thing the input accounting caught
+
+The file is **6.09 GB, of which only 4.48 GB is syslog.** The trailing 1.61 GB
+(26%) has entropy 7.998 bits/byte, is incompressible, and contains exactly one
+`date=` occurrence — the truncated tail of the last real line. It is **random
+padding**, so no events are missing.
+
+But our pipeline had been silently skipping a quarter of the input while
+reporting 100% accuracy on the rest. That is a true statement about an unstated
+subset — the most dangerous failure mode a log tool has. It is now measured, and
+a test fails if any region of any input is neither parsed nor positively
+explained.
 
 ---
 
@@ -346,6 +450,31 @@ licence, no card. Runs on the 16 GB laptop in the room.
 - **Rule-based detection misses novel attacks.** Mitigated by rules-as-config
   and by the rarity-based hunting view, which found all five attacker accounts
   on the real file with no rule describing them.
+- **We cannot give a false-negative rate.** We only know about attacks we
+  found. Establishing what we *missed* needs intrusions someone else confirmed.
+
+### "Why not train a model on this data for exact accuracy?"
+
+A fair question with a specific answer: **it would produce a number that looks
+better and means less.**
+
+- **There are no real-world labels to train on.** The file arrived with no
+  answer key. Our ground truth is our own inference from rarity analysis.
+  Training on self-derived labels and then scoring against those same labels is
+  the circularity above, one level deeper and much harder to spot.
+- **This file is demonstrably synthetic.** 22 near-duplicate webfilter
+  categories ("Phishing Tactics", "Phishing Patterns", "Phishing Methods",
+  "Fishing Attacks"), 45 vendor-word-salad IPS signatures, a perfectly uniform
+  36-events-per-host distribution, and 1.61 GB of random padding. A model
+  trained to fit those artefacts would get **worse** on real telemetry.
+- **What would make it meaningful:** labelled intrusion data from a production
+  estate, with incidents confirmed by the responders who handled them. We have
+  none, and no amount of code substitutes for it.
+
+So instead of a trained score we built a scorer that checks us against things
+we did not author — the vendor's signature names, the data's own vocabulary,
+and the bytes of the file. Those come out at **100%, 96% and fully accounted
+for**, and they are the numbers we will defend under questioning.
 
 ---
 

@@ -51,11 +51,31 @@ format alongside our flat JSON and the EDR generator's ECS JSON.
 | Peak memory, detection | **813 MB** (PRD "Great" bar: 8 GB) |
 | Correlation of 373,061 detections | **2.0 s** |
 | Open one incident | **4.0 ms** (bar: 500 ms) |
-| **Detection rate** | **100%** |
-| **Correct ATT&CK labels** | **100%** |
+| **Detection rate** | **100%** ⚠️ *see note* |
+| **Correct ATT&CK labels** | **100%** ⚠️ *see note* |
 | **False alarm rate** | **0%** |
 | Incidents reported | **5** |
 | 2.0 evidence layer, added cost | **+51 s, 590 MB peak** |
+
+> ⚠️ **Those two figures are nearly circular, and we would rather say so.** The
+> organisers supplied this file with **no answer key**, so we derived one
+> ourselves by rarity analysis and then wrote rules to find those events. The
+> metric therefore measures *"do the rules we wrote find the things we wrote
+> them for?"*
+>
+> The numbers that **are** independent, because they check us against something
+> we did not author:
+>
+> | Independent measurement | Result |
+> |---|---|
+> | Detections from techniques **outside** our answer key | **99.997%** |
+> | Label precision vs **Fortinet's own** signature names | **100%** (229,757 checked, **0** disagree) |
+> | Coverage of real IPS signatures / antivirus signatures | **96%** / **100%** |
+> | Input bytes accounted for | **100%** (26% proved to be random padding) |
+> | True **false-negative** rate on real intrusions | **unknown — not measurable here** |
+>
+> Run `python scripts/validate_independent.py` to reproduce all of it.
+> Full reasoning: **[docs/ACCURACY.md](docs/ACCURACY.md)**.
 
 **The attack it finds, ranked #1:** an administrator account `svc_backup30`
 created at 03:55, used to log in at 04:02, and deleted at 04:07 — created, used
