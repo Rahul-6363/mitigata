@@ -17,7 +17,7 @@ modules, new tables, no edits to the engine) exists to make the answer *no*.
 
 | Metric | Baseline 1.x | After 2.0 | Verdict |
 |---|---|---|---|
-| **FortiGate** — detections | 373,061 | **373,061** | identical |
+| **FortiGate** — detections | 373,239 | **373,239** | identical |
 | FortiGate — incidents | 5 | **5** | identical |
 | FortiGate — detection rate | 100.0% | **100.0%** | identical |
 | FortiGate — correct ATT&CK labels | 100.0% | **100.0%** | identical |
@@ -54,7 +54,7 @@ python scripts/run_cp2.py --db firex.db --input D:/firex-10G.log
 
 The two expensive steps are the only ones that touch the source file. The
 evidence layer itself runs in **under half a second** because it works from the
-373,061 stored detections rather than the 9.1 million log lines — which is why
+373,239 stored detections rather than the 9.1 million log lines — which is why
 the dashboard stays interactive on a 6.54 GB investigation.
 
 For comparison, 1.x detection on the same file takes ~99 s at 813 MB peak. The

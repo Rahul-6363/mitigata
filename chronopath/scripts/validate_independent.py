@@ -136,6 +136,12 @@ REAL_THREAT_SIGNATURES = {
 AV_VERDICT_RE = re.compile(r"!tr|^[A-Z]{1,3}\d*/|\.dldr$", re.IGNORECASE)
 AV_EXPECTED_TECHNIQUE = "T1566"
 
+# An aggregate rule's `message` is always "<metric label>: <number>" --
+# "Matching events: 4752", "Distinct source IPs: 2", "Bytes transferred:
+# 58800000", "Distinct accounts targeted: 819". Matched by shape so a new
+# metric_label cannot silently drop out of the accounting.
+_AGGREGATE_MSG_RE = re.compile(r"^[A-Za-z][A-Za-z ]{2,40}:\s*\d+$")
+
 # Vendor-product strings that name no threat. These are the signatures we
 # deliberately report as UNMAPPED, and this script checks that choice was
 # right rather than assuming it.
@@ -307,7 +313,14 @@ def classify_signature(name):
     # opinion to check these against, so they are excluded from the precision
     # denominator rather than counted as failures -- scoring ourselves against
     # our own text would be the circularity this whole script exists to avoid.
-    if low.startswith(("matching events:", "distinct source ips:")) or low in (
+    #
+    # Matched by SHAPE rather than by an explicit list of labels. The first
+    # version listed "matching events:" and "distinct source ips:" by hand, and
+    # the moment a rule was added with a new metric_label ("Distinct accounts
+    # targeted") its 178 detections silently fell into "unknown" -- quietly
+    # understating how much of the corpus is accounted for. Any
+    # "<label>: <number>" string is an aggregate rule's metric line.
+    if _AGGREGATE_MSG_RE.match(name) or low in (
             "admin login successful", "admin login failed",
             "attribute configured", "object attribute configured",
             "ssl vpn tunnel up"):

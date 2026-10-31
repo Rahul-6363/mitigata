@@ -88,7 +88,7 @@ python scripts/evaluate.py --db firex.db --truth data/ground_truth_firex.json
 | Peak memory, detection | **813 MB** | <8 GB = Great |
 | Peak memory, 2.0 layer | **590 MB** | — |
 | Events processed | **9,125,382** | — |
-| Detections → incidents | **373,061 → 5** | — |
+| Detections → incidents | **373,239 → 5** | — |
 
 All four PRD accuracy metrics at the "Great" bar — **and we will tell you
 ourselves why two of them deserve an asterisk.**
@@ -106,10 +106,10 @@ We built a second scorer that cannot be gamed that way
 
 | Independent measurement | Result | Why it is independent |
 |---|---|---|
-| Detections from techniques **outside** our answer key | **99.997%** | Hold-out: 373,051 of 373,061 |
+| Detections from techniques **outside** our answer key | **99.997%** | Hold-out: 373,229 of 373,239 |
 | Label precision vs **Fortinet's own signature names** | **100%** — 229,757 checked, **0** disagree | Fortinet wrote those strings, not us |
 | Real threats left UNMAPPED | **0** | — |
-| Coverage of real IPS signatures | **96%** (23/24) | Measured against the data's vocabulary |
+| Coverage of real IPS signatures | **100%** (23/23, excl. the EICAR test file) | Measured against the data's vocabulary |
 | Coverage of antivirus signatures | **100%** (35/35) | Same |
 | Input bytes accounted for | **100%** | 26% proved to be random padding |
 | True **false-negative** rate on real intrusions | **unknown** | ❌ Needs labelled real data. Nobody has given us any. |
@@ -489,7 +489,7 @@ python src/api.py                                # REST: /evidence /gaps /source
 ```
 
 The regression gate is the one to check first. It asserts that the 1.x numbers
-— 373,061 detections, 5 incidents, 100%/100%/0% — are **identical** after the
+— 373,239 detections, 5 incidents, 100%/100%/0% — are **identical** after the
 2.0 layer. The entire architecture exists to make that test pass.
 
 **Full measured results, with method:** [`docs/results_2.0.md`](docs/results_2.0.md)

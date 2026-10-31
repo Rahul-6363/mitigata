@@ -49,13 +49,13 @@ format alongside our flat JSON and the EDR generator's ECS JSON.
 | File | 6.54 GB, **9,125,382 events** |
 | Full detection run, 12 rules | **~99 s** |
 | Peak memory, detection | **813 MB** (PRD "Great" bar: 8 GB) |
-| Correlation of 373,061 detections | **2.0 s** |
+| Correlation of 373,239 detections | **2.8 s** |
 | Open one incident | **4.0 ms** (bar: 500 ms) |
 | **Detection rate** | **100%** ⚠️ *see note* |
 | **Correct ATT&CK labels** | **100%** ⚠️ *see note* |
 | **False alarm rate** | **0%** |
 | Incidents reported | **5** |
-| 2.0 evidence layer, added cost | **+51 s, 590 MB peak** |
+| 2.0 evidence layer, added cost | **+29 s, 590 MB peak** |
 
 > ⚠️ **Those two figures are nearly circular, and we would rather say so.** The
 > organisers supplied this file with **no answer key**, so we derived one
@@ -70,7 +70,7 @@ format alongside our flat JSON and the EDR generator's ECS JSON.
 > |---|---|
 > | Detections from techniques **outside** our answer key | **99.997%** |
 > | Label precision vs **Fortinet's own** signature names | **100%** (229,757 checked, **0** disagree) |
-> | Coverage of real IPS signatures / antivirus signatures | **96%** / **100%** |
+> | Coverage of real IPS signatures / antivirus signatures | **100%** / **100%** |
 > | Input bytes accounted for | **100%** (26% proved to be random padding) |
 > | True **false-negative** rate on real intrusions | **unknown — not measurable here** |
 >

@@ -53,9 +53,9 @@ Score only the techniques **no rule was written from**:
 | | Detections | Distinct techniques |
 |---|---|---|
 | Techniques we wrote rules **from** the answer key | 10 | 6 |
-| Techniques found **independently** | **373,051** | **11** |
+| Techniques found **independently** | **373,229** | **12** |
 
-**99.997% of all detections, and 11 of 17 distinct techniques, are independent
+**99.997% of all detections, and 12 of 18 distinct techniques, are independent
 of the ground truth we authored.** The pipeline is not a lookup table for eight
 events; the overwhelming majority of what it finds, it finds without having
 been told to look for it.
@@ -74,10 +74,11 @@ these signature strings, not us.** A signature reading
 | UNMAPPED, correctly — signature names no threat | 143,136 |
 | UNMAPPED, a real miss — signature names a real threat | **0** |
 | Unclassifiable | **0** |
-| No external opinion exists (our own aggregate output) | 168 |
+| No external opinion exists (our own aggregate output) | 346 |
 
 **Label precision: 100.0%** on the 229,757 detections checkable against an
-opinion we did not author. Enforced by
+opinion we did not author. All **373,239** detections are accounted for
+exactly — nothing falls through. Enforced by
 `test_label_precision_against_vendor_signatures`, not just reported here.
 
 This check earned its place immediately — it found two real mislabels. See §4.
@@ -88,9 +89,15 @@ The honest denominator: every distinct signature the firewall itself reports.
 
 | Stream | Distinct signatures | Name a real threat | We label | Coverage of real threats |
 |---|---|---|---|---|
-| IPS (`attack`) | 69 | 24 | 23 | **96%** |
+| IPS (`attack`) | 69 | 24 | 23 | **96%** — the 24th is EICAR, see below |
 | Antivirus (`virus`) | 35 | 35 | 35 | **100%** |
 | Web filter (`catdesc`) | 23 | 1 | 0 | **0%** — see §5 |
+
+The one "real" IPS signature we do not label is **`Eicar.Virus.Test.File`**, the
+industry-standard *harmless* antivirus test file. Our malware rule excludes it
+deliberately (`fg_virus NOT ILIKE '%eicar%'`), because reporting a test file as
+malware is a false positive. So the true coverage of real threats is **23/23**;
+the 96% understates it because the checker counts EICAR in the denominator.
 
 The IPS figure looks like 33% until you read the 45 signatures we leave
 unlabelled: `Splunk.security.VM`, `Fortinet.Protection.WAF`,
@@ -198,6 +205,95 @@ metric to trust alone.
 
 ---
 
+## 4b. Three further gaps found by auditing the data, not the metrics
+
+Each of these was invisible to the headline 100%, because that metric only ever
+looks at the eight planted events.
+
+### A technique we could not express: password spraying (T1110.003)
+
+The brute-force rule groups by source address and counts attempts, answering
+*"is one address hammering us?"* It cannot answer the more diagnostic question
+*"is one address trying **many different accounts**?"* Those are different
+ATT&CK techniques with opposite responses — spraying is designed to stay under
+per-account lockout thresholds, so an unchanged lockout policy is no evidence
+it failed.
+
+Measured on this file:
+
+| | |
+|---|---|
+| External addresses making failed admin logins | **264** |
+| Failed attempts per address | **~8,000** |
+| Distinct usernames targeted | **956** (`admin`, `root`, `administrator`, `administrador`, `usuario`, `test`) |
+| Worst single (address, hour) | **839 distinct usernames** |
+
+The distribution of distinct usernames per (address, hour) breaks cleanly:
+
+| p50 | p75 | p90 | p95 | p99 | p99.9 | max |
+|---|---|---|---|---|---|---|
+| 10 | 17 | 26 | 31 | **43** | **825** | 839 |
+
+A threshold of **50** sits in that gap rather than being tuned to it, and it is
+**stable** — 50, 100, 200, 400 and 600 all yield 157 buckets, which is how you
+can tell the cluster is real. At 20 it would yield 5,114 and swamp the output.
+
+**+178 detections, and all four accuracy metrics unchanged.** The rule carries
+`outcome: attempted`, so triage keeps the spray out of the incident list as a
+blocked threat rather than inventing 178 false incidents.
+
+We also checked whether any sprayed address later **succeeded** — that would be
+a missed attack chain. **It did not:** the 158 spray addresses and the 4
+successful-login addresses do not overlap at all.
+
+### `event_count` was holding the rule's metric, not a row count
+
+This one was wrong by six orders of magnitude and nothing flagged it.
+
+| Rule | metric | `event_count` before | after |
+|---|---|---|---|
+| EDR exfiltration (T1041) | `SUM(bytes_out)` | **58,800,000** | **14** |
+| FortiGate VPN (T1133) | `COUNT(DISTINCT src_ip)` | 2 | **4** |
+
+The first reported *58.8 million raw alerts merged* for a single detection —
+bonus B-3 inflated absurdly. The second **understated the evidence**, which is
+the more dangerous direction: `keerat.ghughal` has **four** VPN tunnels from two
+countries, and the analyst was told two events. A credential used four times
+from two countries is worse than one used twice.
+
+Fixed to `COUNT(*)` always. The metric still reaches the analyst through
+`message` ("Bytes transferred: 58800000"), which is where a number that is not
+a row count belongs. The EDR top incident's risk moved **92.8 → 92.5** as a
+result: the score becoming accurate, not drifting.
+
+### A 1,368-second step, from a pre-filter that was described but never written
+
+`enrich_from_source` carried a comment claiming a cheap pre-filter on fixed
+string offsets. The code ran `re.search(r'user="..."')` on **every line before
+testing the date** — 9.1 million regex searches to serve 10 lookups.
+
+| | Before | After |
+|---|---|---|
+| Raw-line evidence step | **1,368.3 s** | **6.4 s** |
+| Whole 2.0 layer | ~1,406 s | **~29 s** |
+
+Same output: 10 detections enriched, identity-pivot proof intact. A **214×**
+speedup, found only because a timeout made the cost visible — the step had
+always been slow and nothing measured it.
+
+### Two gaps we probed and correctly do *not* have
+
+Worth recording, because "we checked and there is nothing there" is a finding:
+
+- **DNS tunnelling / DGA** in the EDR data: 47,649 `dns_query` events, but only
+  **9 distinct domains**, all legitimate (`teams.microsoft.com`, `github.com`),
+  max length 25 characters. A DNS-anomaly rule would detect nothing because
+  there is nothing to detect.
+- **Missed attack chains from the spray campaign**: no overlap between spray
+  sources and successful logins, as above.
+
+---
+
 ## 5. A rule we wrote, measured, and deliberately switched off
 
 §2C reports **0% coverage of the webfilter stream** — 408,635 events, with
@@ -280,13 +376,13 @@ is checkable rather than taken on trust.
 
 | Claim | Value | How independent? |
 |---|---|---|
-| Detections from techniques outside our answer key | **99.997%** | ✅ Fully — hold-out |
+| Detections from techniques outside our answer key | **99.997%** (373,229 / 373,239) | ✅ Fully — hold-out |
 | Label precision vs vendor signature names | **100.0%** (229,757 checked, 0 disagree) | ✅ Fully — external opinion |
 | Real threats left UNMAPPED | **0** | ✅ Fully |
-| Coverage of real IPS signatures | **96%** (23/24) | ✅ Fully — data's own vocabulary |
+| Coverage of real IPS signatures | **100%** (23/23 excl. the EICAR test file) | ✅ Fully — data's own vocabulary |
 | Coverage of antivirus signatures | **100%** (35/35) | ✅ Fully |
 | Input bytes accounted for | **100%** (26% explained as padding) | ✅ Fully — measured |
-| ATT&CK techniques covered | 26, across 11 of 14 tactics | ✅ Countable |
+| ATT&CK techniques covered | 27, across 11 of 14 tactics | ✅ Countable |
 | Detection rate on the planted attack | 100% | ⚠️ **Nearly circular** — §1 |
 | Correct ATT&CK labels on the planted attack | 100% | ⚠️ **Nearly circular** — §1 |
 | False alarm rate | 0% | ⚠️ Relative to one synthetic file |
