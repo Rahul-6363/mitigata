@@ -42,6 +42,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import graph_engine  # noqa: E402
 from elliot import ui as elliot_ui  # noqa: E402
+import live_ui  # noqa: E402
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -653,6 +654,22 @@ def render_graph(incident):
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
+# Live mode is a separate page over live.db (written by live_detector.py);
+# investigate mode is everything below, over a batch database.
+MODE = st.sidebar.radio("Mode", ["Investigate", "Live"], horizontal=True,
+                        help="Live follows a growing log through "
+                             "src/live_detector.py and refreshes every 3 s.")
+if MODE == "Live":
+    live_db = os.environ.get("CHRONOPATH_LIVE_DB",
+                             os.path.join(PROJECT_ROOT, "live.db"))
+    st.markdown(
+        "<div class='cp-masthead'><span class='cp-name'>ChronoPath</span>"
+        "<span class='cp-tag'>Kill chain and attack path analysis</span></div>"
+        f"<div class='cp-subline'>CyberForge 2026 &nbsp;·&nbsp; live: "
+        f"{html.escape(os.path.basename(live_db))}</div>", unsafe_allow_html=True)
+    live_ui.render(live_db, render_graph, generate_report, fallback_report)
+    st.stop()
+
 st.markdown(
     "<div class='cp-masthead'><span class='cp-name'>ChronoPath</span>"
     "<span class='cp-tag'>Kill chain and attack path analysis</span></div>"

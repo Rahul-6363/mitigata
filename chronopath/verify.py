@@ -196,7 +196,8 @@ def check_rules(r):
 def check_tests(r):
     print("\n3. Test suite (includes the regression gate)")
     for name, label in (("test_chronopath2.py", "test suite"),
-                        ("test_elliot.py", "investigator tests")):
+                        ("test_elliot.py", "investigator tests"),
+                        ("test_live.py", "live mode tests")):
         _run_test_file(r, name, label)
 
 

@@ -153,6 +153,20 @@ def test_no_claimed_actions():
     print("    nothing claims to have been done; moves are labelled recommendations")
 
 
+def test_keys_are_unique():
+    # The dashboard keys a button on each finding and each move; a repeated key
+    # crashed the page (an account in two identity-pivot links).
+    runs = _investigations()
+    if not runs and _skip("no ChronoPath database in the project folder"):
+        return
+    for db, inv, _ in runs:
+        f_keys = [f.key for f in inv.findings]
+        m_keys = [m["key"] for m in inv.next_moves()]
+        assert len(f_keys) == len(set(f_keys)), f"{db}: duplicate finding key"
+        assert len(m_keys) == len(set(m_keys)), f"{db}: duplicate move key"
+    print("    every finding and every next move has a unique key")
+
+
 def test_predictions_are_labelled():
     runs = _investigations()
     if not runs and _skip("no ChronoPath database in the project folder"):

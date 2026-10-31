@@ -24,7 +24,7 @@ that, with a measurement, rather than guess either way — see
 
 ---
 
-> **Using the website?** **[WEBSITE_GUIDE.md](WEBSITE_GUIDE.md)** explains every
+> **Using the website?** **[README_OF_WEBSITE.md](README_OF_WEBSITE.md)** explains every
 > part of the dashboard with real examples.
 
 > **New to this project?** Read **[START_HERE.md](START_HERE.md)** first — it
@@ -126,6 +126,59 @@ streamlit run src/app.py                                      # the "Investigato
 python src/api.py   # GET /incidents/INC-01/elliot, /incidents/INC-01/elliot/ask?q=...
 python tests/test_elliot.py                                   # 8 tests, incl. no-fabrication
 ```
+
+---
+
+## ⏱️ Live mode
+
+Batch mode answers *"what happened in this file?"*. Live mode answers *"what is
+happening now?"*: lines appended to a log become alerts, incidents and an
+updated attack graph on the dashboard within about two seconds.
+
+**It is micro-batch, not true streaming.** Every 2 s the detector reads the
+complete lines appended since the last tick, runs the rules on that small
+batch, and updates only the incidents those alerts touch.
+
+```bash
+# terminal 1 -- the detector follows a file (it may not exist yet)
+python src/live_detector.py --input data/live.ndjson
+
+# terminal 2 -- replay the sample attack into that file at 10x speed
+python scripts/replay.py --source data/sample.ndjson --target data/live.ndjson     --start 2026-10-20T12:50:00 --speed 10
+
+# terminal 3 -- the dashboard: choose "Live" under Mode in the sidebar
+streamlit run src/app.py
+```
+
+**How it works**
+
+| Piece | What it does |
+|---|---|
+| `Tailer` | Follows the file by byte offset; returns only complete lines, carries a half-written line to the next tick, re-reads from 0 on truncation or rotation |
+| `LiveRules` | Row rules run on each batch; aggregate rules run on a rolling window (120 min of event time, evicted every tick); one alert per burst, updated as the burst grows. Uses `parser.py`'s own rule loading, SQL builders and format adapters -- no duplicated logic |
+| `LiveCorrelator` | One NetworkX graph in memory. A new alert links to its time-neighbours in each entity bucket (batch mode's rule); only the components it touches are rebuilt into incidents with `graph_engine`'s scoring and triage |
+| `LiveStore` | SQLite `live.db` in WAL mode, so the dashboard reads while the detector writes (DuckDB allows one writer process and blocks other readers) |
+| `scripts/replay.py` | Plays a recorded log into the file at `--speed N`, preserving relative timing, stamping each line with its append time |
+| Dashboard | `@st.fragment(run_every="3s")` refreshes only the live section; the AI narrative is written on click only, cached per incident version |
+
+**Measured** (sample data, 10x replay, 2 s poll, this laptop):
+
+| Measurement | Result |
+|---|---|
+| Line appended -> alert committed | median **1.4 s**, max **1.95 s** (8 alerts) |
+| Detector processing per tick | 0.08 s average |
+| Same incidents and ATT&CK labels as batch | **yes** -- sample (1 incident, 8 techniques, risk 86.0) and EDR with ambient noise (risk 83.3), both identical |
+| Memory over 1.15 M lines / 48 h of event time | window capped at ~48 k rows; RSS 102 MB -> 116 MB |
+
+Most of the latency is waiting for the next poll; `--poll 1` roughly halves it.
+
+**Limitations.** One machine, one input file. Aggregate rules only see the
+rolling window, so a rule that counts across a whole file (rather than inside
+a time bucket) behaves differently live. Alerts are kept for the life of the
+process. Incident IDs are `L00001`-style, stable while the detector runs, not
+`INC-01`. A production version would put Kafka in front and run the rules in a
+stream processor (Flink, Spark Structured Streaming); the rules and scoring
+would carry over unchanged.
 
 ---
 
@@ -749,6 +802,16 @@ commented inline.
    all — purely because they touch 1-3 things each while normal accounts touch
    hundreds. That catches the attack nobody wrote a rule for."*
 7. **Close (10 s).** *"Runs on this laptop. Costs nothing. New rules are one YAML edit."*
+
+**Live (60 s).** Before the demo, start `python src/live_detector.py --input
+data/live.ndjson` and the dashboard in **Live** mode. On stage, run
+`python scripts/replay.py --source data/sample.ndjson --target data/live.ndjson
+--start 2026-10-20T12:50:00 --speed 30`. *"This is the same attack arriving as
+it happens. Watch the incident build: the vendor login, then the brute force,
+then a new admin account -- each one on screen about two seconds after the log
+line is written."* Point at the version number climbing and the latency
+column. *"Same rules, same scoring as the batch run: we checked the two give
+identical incidents."*
 
 **If Groq fails live:** keep going — the dashboard shows a built-in summary.
 Detection and correlation are deterministic and offline. Saying so out loud

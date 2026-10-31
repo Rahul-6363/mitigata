@@ -160,10 +160,11 @@ class Investigator:
         for q in self.questions:
             cands.append((45, q["key"], f"{q['question']} Needed: {q['evidence_needed']}",
                           q["why"], q["cites"]))
-        moves, seen_text = [], set()
+        moves, seen_text, seen_keys = [], set(), set()
         for priority, key, text, why, cites in sorted(cands, key=lambda c: -c[0]):
-            if text in seen_text:
+            if text in seen_text or key in seen_keys:
                 continue
+            seen_keys.add(key)
             state = self.memory.offer(key, text, evidence_fingerprint(self.pack, cites))
             if state is None:
                 continue   # done or dismissed, and its evidence has not changed
