@@ -73,6 +73,149 @@ PRECEDING_HOURS = 6
 # page of addresses that nobody will read or act on.
 MAX_INDICATORS = 25
 
+# WHEN "STILL ACTIVE" IS A FINDING RATHER THAN NOISE.
+#
+# The naive test -- "last seen is after the incident ended" -- is technically
+# true and operationally useless, and this was caught by rendering the EDR data
+# rather than reasoning about it. That data holds seven days of ambient estate
+# activity while the incident covers four hours of one day, so EVERY ordinary
+# account and internal address trivially "appears after" it. The dashboard
+# flagged 30 indicators as still active, including 10.10.1.11, which is simply
+# a workstation that exists.
+#
+# A still-active flag has to distinguish "the attack continued" from "the
+# estate kept running". Two conditions, both required:
+#
+#   1. The activity must be meaningfully later -- past a grace period, not
+#      merely the next detection in the same burst.
+#   2. The indicator must be SPECIFIC. An internal address is a place, not an
+#      actor: a workstation generating events after the incident is not
+#      evidence that the intrusion is ongoing. An external address or a named
+#      account is specific enough to carry the claim.
+#
+# This is a precision choice and it has a cost: a compromised internal host
+# genuinely still beaconing would not be flagged here. That is the right
+# trade-off for this field, because it exists to say "drop everything" -- and a
+# field that cries wolf thirty times is one an analyst learns to ignore, which
+# is strictly worse than not having it.
+#
+# 30 minutes, not 60. The first attempt used an hour and suppressed a real
+# case: on the FortiGate data, Deepika.Khan's third external admin login lands
+# 57.9 minutes after the second, and an hour-long grace hid it. Since the
+# ambient test below now does the noise rejection, this only has to absorb
+# continuation within the same burst -- which is a matter of minutes, not an
+# hour. Verified in both directions: the 57.9-minute case now flags, and the
+# ambient accounts still do not.
+STILL_ACTIVE_GRACE_MINUTES = 30
+
+# THE THIRD CONDITION, and the one that actually separates signal from noise.
+#
+# Conditions 1 and 2 above cut the EDR false flags from 30 to 11, and the 11
+# remaining were ordinary staff accounts -- asharma, rkumar, sgupta -- each with
+# around 2,000 detections spread across all seven days in the file. They are not
+# an intrusion continuing; they are the background of a working estate.
+#
+# The attacker account, by contrast, appears 5 times on a single day.
+#
+#     svc_helpdesk       5 detections,    1 distinct day   <- the attacker
+#     asharma        1,929 detections,    7 distinct days
+#     rkumar         1,937 detections,    7 distinct days
+#     svc_backup     3,260 detections,    7 distinct days
+#
+# So the discriminator is RARITY, the same principle the detection engine
+# already relies on: an indicator that appears on most days of the data set is
+# ambient, and "it appeared again afterwards" says nothing. An indicator that
+# appears on few days and then appears again after the incident is a genuine
+# continuation worth interrupting someone for.
+#
+# Expressed as a share of the days covered, so it scales with the file rather
+# than hard-coding a count.
+AMBIENT_DAY_SHARE = 0.5
+
+
+def _is_specific_indicator(indicator_type, value):
+    """Whether this indicator is specific enough to carry a still-active claim."""
+    if indicator_type == "source_ip":
+        try:
+            import graph_engine
+            return not graph_engine._is_internal(value)
+        except Exception:  # noqa: BLE001
+            return False
+    # Accounts are actors, so they pass this particular test.
+    return True
+
+
+def _is_ambient(con, column, value):
+    """
+    Whether this indicator appears across most of the data set.
+
+    An ambient indicator cannot support a still-active claim, because it was
+    never absent -- see AMBIENT_DAY_SHARE. Returns False on any error, which
+    errs toward showing the flag rather than silently hiding it.
+    """
+    try:
+        row = con.execute(
+            f'SELECT COUNT(DISTINCT substr(timestamp, 1, 10)) '
+            f'FROM suspicious_events WHERE "{column}" = ?', [value]).fetchone()
+        total = con.execute(
+            "SELECT COUNT(DISTINCT substr(timestamp, 1, 10)) "
+            "FROM suspicious_events").fetchone()
+    except Exception:  # noqa: BLE001
+        return False
+    if not row or not total or not total[0]:
+        return False
+    days_seen, days_total = int(row[0] or 0), int(total[0])
+    # On a one- or two-day file every indicator looks ambient by this measure,
+    # so the test is only meaningful once there is a spread to compare against.
+    if days_total < 3:
+        return False
+    return days_seen / days_total >= AMBIENT_DAY_SHARE
+
+
+def _still_active_note(indicator_type, value, last_seen, incident_end,
+                       parse_ts=None, con=None, column=None):
+    """
+    Build the still-active note, or return "" when the flag is not warranted.
+
+    Returns a sentence stating the gap explicitly, so an analyst can judge the
+    claim rather than trust the threshold behind it.
+    """
+    from datetime import datetime
+
+    if not last_seen or not incident_end:
+        return ""
+    if not _is_specific_indicator(indicator_type, value):
+        return ""
+    if con is not None and column and _is_ambient(con, column, value):
+        return ""
+
+    def _ts(v):
+        if parse_ts:
+            return parse_ts(v)
+        return datetime.fromisoformat(
+            str(v).replace("Z", "+00:00")).replace(tzinfo=None)
+
+    try:
+        last, end = _ts(last_seen), _ts(incident_end)
+    except (ValueError, TypeError):
+        return ""
+
+    minutes_after = (last - end).total_seconds() / 60.0
+    if minutes_after <= STILL_ACTIVE_GRACE_MINUTES:
+        return ""
+
+    if minutes_after >= 1440:
+        gap = f"{minutes_after / 1440:.1f} days"
+    elif minutes_after >= 60:
+        gap = f"{minutes_after / 60:.1f} hours"
+    else:
+        gap = f"{minutes_after:.0f} minutes"
+
+    return (f"STILL ACTIVE -- last seen {last_seen}, which is {gap} after this "
+            f"incident's final event ({incident_end}). This indicator is not "
+            f"ambient in the data, so the activity genuinely did not stop when "
+            f"the reported incident did.")
+
 
 def _ensure_table(con):
     con.execute("""
@@ -139,7 +282,7 @@ def _created_and_deleted(events):
     return sorted(created), sorted(deleted)
 
 
-def indicators(con, incident):
+def indicators(con, incident, parse_ts=None):
     """
     Build the copyable indicator list for one incident, with estate-wide dates.
     """
@@ -157,13 +300,12 @@ def indicators(con, incident):
 
     for value in accounts[:MAX_INDICATORS]:
         seen = _lookup(con, "user", value)
-        note = ""
-        if seen and inc_end and str(seen["last_seen"]) > str(inc_end):
-            # The indicator outlived the incident. This is the single most
-            # operationally important thing this module can say.
-            note = ("STILL ACTIVE after this incident ended -- last seen "
-                    f"{seen['last_seen']}, which is after the incident's last "
-                    f"event ({inc_end}).")
+        # Did the indicator outlive the incident by enough to matter? This is
+        # the single most operationally important thing this module says, which
+        # is exactly why it has to be precise -- see STILL_ACTIVE_GRACE_MINUTES.
+        note = _still_active_note(
+            "account", value, seen["last_seen"] if seen else None, inc_end,
+            parse_ts, con=con, column="user") if seen else ""
         out.append({
             "incident_id": inc_id, "indicator_type": "account",
             "value": value,
@@ -175,10 +317,9 @@ def indicators(con, incident):
 
     for value in ips[:MAX_INDICATORS]:
         seen = _lookup(con, "src_ip", value)
-        note = ""
-        if seen and inc_end and str(seen["last_seen"]) > str(inc_end):
-            note = ("STILL ACTIVE after this incident ended -- last seen "
-                    f"{seen['last_seen']}.")
+        note = _still_active_note(
+            "source_ip", value, seen["last_seen"] if seen else None, inc_end,
+            parse_ts, con=con, column="src_ip") if seen else ""
         out.append({
             "incident_id": inc_id, "indicator_type": "source_ip",
             "value": value,
@@ -449,7 +590,7 @@ def analyse(con, incidents, gaps_by_incident=None, persist=True, parse_ts=None):
 
     for inc in incidents:
         inc_id = inc.get("id", "INC")
-        ind = indicators(con, inc)
+        ind = indicators(con, inc, parse_ts=parse_ts)
         rows.extend(ind)
         out[inc_id] = {
             "indicators": ind,
