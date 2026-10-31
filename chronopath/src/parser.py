@@ -82,13 +82,35 @@ def detect_format(log_path):
 
 
 def load_rules(path="rules.yaml"):
-    """Read detection rules from config. No detection logic lives in this file."""
+    """
+    Read detection rules from config. No detection logic lives in this file.
+
+    A rule may carry `enabled: false`, which loads it for documentation but
+    does not run it. That exists for a specific and recurring situation: a
+    detection that is correct in principle and measurably useless on a given
+    data set.
+
+    The worked example is webfilter browsing to malicious categories. On the
+    organisers' file, 408,635 such events are spread evenly across 1,386 hosts
+    (mean 36 per host, standard deviation 6.1), and 1,386 of the 1,388 hosts we
+    detect anything on appear in that set. Enabling it would add ~368,000
+    detections and over a thousand single-host incidents, destroying a measured
+    0% false-alarm rate, and would find no attacker -- the five known attacker
+    addresses appear in webfilter exactly zero times.
+
+    Deleting the rule would lose the analysis. Shipping it enabled would wreck
+    the output. So it ships off, with the measurements recorded beside it, and
+    one word turns it on for a data set where browsing telemetry is informative.
+    """
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
     rules = data.get("rules", [])
     if not rules:
         raise ValueError(f"No rules found in {path}")
-    return rules
+    active = [r for r in rules if r.get("enabled", True)]
+    if not active:
+        raise ValueError(f"Every rule in {path} is disabled")
+    return active
 
 
 def configure_connection(con, memory_limit="8GB", spill_dir="./tmp_spill"):
@@ -275,7 +297,16 @@ def build_aggregate_query(rule, src):
     time. The cost is one extra aggregation over an already-filtered stream,
     which is negligible.
     """
-    group_cols = ", ".join(rule["group_by"])
+    # `group_by` is a list of column names. A bare string is accepted too,
+    # because writing `group_by: "host"` instead of `group_by: ["host"]` is an
+    # easy slip in YAML and the failure it caused was baffling: joining a
+    # string iterates its characters, so it produced `GROUP BY h, o, s, t` and
+    # a binder error about a column named "h". Normalising here turns a
+    # confusing SQL error into the rule simply working.
+    group_by = rule["group_by"]
+    if isinstance(group_by, str):
+        group_by = [group_by]
+    group_cols = ", ".join(group_by)
 
     bucket = rule.get("bucket_minutes")
     if not bucket:

@@ -450,6 +450,165 @@ def test_indicators_span_whole_dataset():
     print(f"    {len(rows)} account indicator(s), all counted dataset-wide")
 
 
+
+# --------------------------------------------------------------------------
+# 9. The honest-accuracy guards
+#
+# These exist because the headline "100% detection / 100% labels" from
+# evaluate.py is measured against ground truth WE derived and then wrote rules
+# for -- it is close to circular. These tests guard the claims that are NOT
+# circular, so that a future change cannot quietly turn an honest number into
+# a flattering one.
+# --------------------------------------------------------------------------
+
+def test_label_precision_against_vendor_signatures():
+    """
+    Our ATT&CK labels must agree with the firewall vendor's own signature names.
+
+    Fortinet wrote these signature strings, not us, so they are the one
+    external opinion in the data. A signature reading
+    `Apache.Log4j...Remote.Code.Execution` is independent evidence that T1190
+    is correct -- and a disagreement is a genuine mislabel, not a difference of
+    opinion.
+
+    Two real mislabels were found this way and fixed:
+      * 135,623 antivirus detections were T1105 "Ingress Tool Transfer" at
+        stage Execution. 135,620 of them are action=blocked, so nothing
+        executed; they are delivery (T1566).
+      * 54,563 app-control events were T1071.001 Command and Control. The
+        applications involved are Instagram, Tinder, Skype and Dropbox.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    try:
+        from validate_independent import precision_vs_vendor
+    except ImportError:
+        _skip("validate_independent.py not importable")
+        return
+    if not os.path.exists(FIREX_DB):
+        _skip("firex.db missing")
+        return
+    con = duckdb.connect(FIREX_DB, read_only=True)
+    try:
+        result = precision_vs_vendor(con)
+    finally:
+        con.close()
+
+    assert result["disagree"] == 0, (
+        f"{result['disagree']:,} detections carry an ATT&CK technique that "
+        f"contradicts the vendor signature name. First few: "
+        f"{result['disagreements'][:3]}")
+    assert result["unmapped_missed"] == 0, (
+        f"{result['unmapped_missed']:,} detections are UNMAPPED although the "
+        f"signature names a real, published threat: {result['missed'][:3]}")
+    assert result["precision_pct"] == 100.0, (
+        f"label precision is {result['precision_pct']:.1f}%, expected 100%")
+    print(f"    {result['agree']:,} agree with the vendor, 0 disagree, "
+          f"{result['unmapped_correctly']:,} correctly UNMAPPED")
+
+
+def test_detections_are_not_purely_memorised():
+    """
+    Most detections must come from techniques we did NOT write rules from.
+
+    If every detection matched a technique in our own answer key, the pipeline
+    would be a lookup table for eight events rather than a detector. This
+    asserts the opposite: the overwhelming majority of what it finds is
+    independent of the ground truth we authored.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    try:
+        from validate_independent import holdout_detection
+    except ImportError:
+        _skip("validate_independent.py not importable")
+        return
+    if not os.path.exists(FIREX_DB):
+        _skip("firex.db missing")
+        return
+    con = duckdb.connect(FIREX_DB, read_only=True)
+    try:
+        memorised, independent = holdout_detection(con)
+    finally:
+        con.close()
+
+    mem_n = sum(r["detections"] for r in memorised)
+    ind_n = sum(r["detections"] for r in independent)
+    assert ind_n > mem_n, (
+        f"only {ind_n:,} detections are independent of our answer key against "
+        f"{mem_n:,} that are not -- the result is mostly memorisation")
+    assert len(independent) >= 5, (
+        f"only {len(independent)} distinct techniques found outside the "
+        f"answer key; detection is too narrow to call general")
+    share = ind_n / (ind_n + mem_n) * 100
+    print(f"    {share:.1f}% of detections from {len(independent)} techniques "
+          f"outside the answer key")
+
+
+def test_every_input_byte_is_accounted_for():
+    """
+    No part of the input may be silently skipped.
+
+    This is the failure mode that invalidates every other number: reading 40%
+    of a file and reporting 100% accuracy on the rest is a true statement about
+    an unstated subset. Measured on the organisers' file, 1.61 GB -- 26% of the
+    bytes -- is not syslog. The test requires that region be positively
+    EXPLAINED (high entropy, incompressible, no record markers = padding),
+    not merely ignored.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    try:
+        from validate_independent import account_for_input
+    except ImportError:
+        _skip("validate_independent.py not importable")
+        return
+    log = os.environ.get("CHRONOPATH_LOG", "D:/firex-10G.log")
+    if not os.path.exists(log):
+        _skip(f"{log} not present")
+        return
+    acct = account_for_input(log)
+    if acct["trailing_bytes"] > 0:
+        assert acct.get("data_loss") is False, (
+            f"{acct['trailing_bytes']:,} bytes "
+            f"({acct.get('trailing_share_pct', 0):.0f}%) of the input are "
+            f"neither parsed nor explained: {acct['verdict']}")
+        print(f"    {acct['trailing_share_pct']:.0f}% trailing region "
+              f"explained as padding (entropy "
+              f"{acct.get('entropy_bits_per_byte')})")
+    else:
+        print("    every byte is syslog; nothing unexplained")
+
+
+def test_disabled_rules_are_documented_not_forgotten():
+    """
+    A rule shipped with `enabled: false` must say why, with numbers.
+
+    Disabling a rule is a judgement call, and an undocumented one is
+    indistinguishable from an oversight. The webfilter rule is off because
+    enabling it would add ~368,000 detections across 1,386 hosts and find no
+    attacker -- that reasoning has to travel with the rule.
+    """
+    import yaml
+
+    for name in ("rules.yaml", "rules_ecs.yaml", "rules_fortigate.yaml"):
+        path = os.path.join(ROOT, name)
+        if not os.path.exists(path):
+            continue
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+            data = yaml.safe_load(text)
+        disabled = [r for r in data.get("rules", [])
+                    if not r.get("enabled", True)]
+        for rule in disabled:
+            assert (rule.get("description") or "").strip(), (
+                f"{name}: disabled rule {rule['name']!r} has no description")
+            # The reasoning lives in a YAML comment above the rule, which
+            # safe_load discards -- so check the raw text for it.
+            assert "DISABLED BY MEASUREMENT" in text, (
+                f"{name}: a rule is disabled but the file carries no "
+                f"explanation of why")
+        if disabled:
+            print(f"    {name}: {len(disabled)} disabled rule(s), "
+                  f"all documented")
+
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     print(f"\nChronoPath 2.0 -- {len(tests)} test(s)\n" + "=" * 62)

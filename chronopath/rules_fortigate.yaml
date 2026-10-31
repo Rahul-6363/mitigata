@@ -287,15 +287,35 @@ rules:
 
   - name: "Antivirus: Malware Detected"
     type: row
-    mitre_technique: "T1105"
-    mitre_name: "Ingress Tool Transfer"
-    kill_chain_stage: "Execution"
+    # WHY T1566 AND NOT T1105 -- a correction found by independent validation.
+    #
+    # This rule previously said T1105 (Ingress Tool Transfer) at stage
+    # "Execution", and both halves were wrong on 135,623 detections -- our
+    # single largest category.
+    #
+    #   T1105 is what an attacker does AFTER gaining access: pulling tooling
+    #   down onto a host they already control. Antivirus intercepting a file
+    #   crossing the perimeter is the delivery attempt itself, which is the
+    #   stage before that.
+    #
+    #   "Execution" was contradicted by the data: 135,620 of 135,623 of these
+    #   carry action="blocked". The file never ran. Calling it Execution tells
+    #   an analyst a host was compromised when the control worked.
+    #
+    # T1566 (Phishing) is the closest honest technique for malicious content
+    # arriving over the network at a perimeter device. The firewall cannot see
+    # whether the delivery vehicle was mail, web or a download, so the parent
+    # technique is used rather than guessing a sub-technique.
+    mitre_technique: "T1566"
+    mitre_name: "Phishing"
+    kill_chain_stage: "Delivery"
     severity: 8
     # EICAR is the industry-standard harmless test file, not malware.
     sql_condition: "fg_virus <> '' AND fg_virus NOT ILIKE '%eicar%'"
     description: >
-      The antivirus engine blocked a malicious file in transit -- the attacker
-      attempting to deliver tooling onto the network.
+      The antivirus engine detected malicious content crossing the perimeter.
+      Almost all of these are blocked, so they are evidence of an attempted
+      delivery rather than of a compromise -- the outcome field carries which.
 
   - name: "IPS: Brute Force Against a Service"
     type: row
@@ -318,13 +338,93 @@ rules:
 
   - name: "High-Risk Application Usage"
     type: row
-    mitre_technique: "T1071.001"
-    mitre_name: "Application Layer Protocol: Web Protocols"
-    kill_chain_stage: "Command and Control"
-    severity: 5
+    # WHY UNMAPPED AND NOT T1071.001 -- a correction found by checking the data.
+    #
+    # This rule previously claimed T1071.001 (Application Layer Protocol: Web
+    # Protocols) at stage "Command and Control" on 54,563 detections. Then we
+    # looked at WHICH applications FortiGate actually rates critical here:
+    #
+    #     KakaoTalk, Instagram, Basecamp, GoogleHangouts, OneDrive, Skype,
+    #     Dropbox, GitLab, Telegram, Tinder, Chocolatey, SSH
+    #
+    # Those are consumer and business applications. Someone opening Instagram
+    # at work is a policy matter, not command-and-control infrastructure.
+    # Labelling it C2 put 54,563 false C2 findings into the corpus and would
+    # have an analyst hunting a beacon that was never there.
+    #
+    # The honest label is UNMAPPED: the firewall is telling us its own policy
+    # was breached, which is real information, but it maps to no ATT&CK
+    # technique without knowing what the application was used FOR. Severity
+    # drops to 2 to match: this is context, not a finding.
+    #
+    # This is the same principle as the UNMAPPED IPS signatures -- a confident
+    # wrong technique is worse than an honest absence of one.
+    mitre_technique: "UNMAPPED"
+    mitre_name: "Policy violation with no ATT&CK mapping"
+    kill_chain_stage: "Unclassified"
+    severity: 2
     # Application control flags its own risk level; we adopt the extreme end
     # only, since 'elevated' is common enough to be noise.
     sql_condition: "fg_apprisk = 'critical'"
     description: >
-      An application the firewall rates as critical risk was used -- often
-      tunnelling or remote-access software that bypasses network controls.
+      An application the firewall rates as critical risk was used. On this
+      data that is overwhelmingly consumer software (messaging, social media,
+      cloud storage), so it is reported as a policy observation rather than
+      attributed to an attack technique.
+
+  # ---------------------------------------------------------------------------
+  # DISABLED BY MEASUREMENT, NOT BY OVERSIGHT.
+  #
+  # This rule is correct in principle: an internal host ALLOWED to reach a
+  # botnet, ransomware or malware-distribution site is a real finding, and
+  # 367,778 of the 408,635 webfilter events in this file were passthrough
+  # rather than blocked. That looks like a 408,635-event blind spot, and the
+  # independent coverage check (scripts/validate_independent.py) reports it as
+  # 0% coverage of the webfilter stream.
+  #
+  # So we measured whether enabling it would help. It would not:
+  #
+  #   * 22 of the 23 webfilter categories in this file are malicious-sounding
+  #     ("Botnet", "Ransomware", "Phishing Tactics", "Phishing Patterns",
+  #     "Scam Scams", "Fishing Attacks"). The near-duplicate names are a
+  #     generator artefact, not a real FortiGuard taxonomy.
+  #   * The events are spread evenly over 1,386 internal hosts: minimum 18,
+  #     median 36, maximum 59, mean 36.2, standard deviation 6.1. The worst
+  #     host sits 3.71 sigma above the mean, which is what the maximum of 1,386
+  #     samples of pure noise looks like -- not an outlier.
+  #   * 1,386 of the 1,388 hosts we detect anything on appear in this set, so
+  #     it discriminates nothing.
+  #   * The five known attacker source addresses appear in webfilter ZERO
+  #     times. This stream contains no part of the planted attack.
+  #
+  # Enabling it would add ~368,000 detections and over a thousand single-host
+  # incidents, taking the false-alarm rate from a measured 0% to roughly 99%,
+  # and would not find one additional attacker.
+  #
+  # It ships disabled rather than deleted, because on a real estate this is a
+  # rule you want: there, malicious-category browsing is rare and concentrated,
+  # and the host that does it is worth investigating. Set `enabled: true` for
+  # such a data set. The numbers above are why it is off here.
+  - name: "Allowed Browsing to Malicious Site Category"
+    enabled: false
+    type: aggregate
+    mitre_technique: "T1189"
+    mitre_name: "Drive-by Compromise"
+    kill_chain_stage: "Delivery"
+    severity: 6
+    group_by: ["host"]
+    bucket_minutes: 60
+    having: "COUNT(*) >= 10"
+    sql_condition: >
+      fg_subtype = 'webfilter'
+      AND status = 'passthrough'
+      AND (fg_catdesc ILIKE '%botnet%'
+           OR fg_catdesc ILIKE '%ransomware%'
+           OR fg_catdesc ILIKE '%malware%'
+           OR fg_catdesc ILIKE '%spyware%')
+    description: >
+      An internal host was allowed -- not blocked -- to reach a web category
+      the firewall itself classes as botnet, ransomware, malware or spyware.
+      On a real estate this is a strong indicator of an infected host calling
+      home or a user being served an exploit kit. See the note above for why
+      it is disabled on the organisers' synthetic data.
