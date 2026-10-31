@@ -5,25 +5,69 @@
 **Tier chosen: Core (15 GB) · 1.0× multiplier**
 
 [![Stack](https://img.shields.io/badge/Stack-Python%203.14%20%7C%20DuckDB%202.0%20%7C%20NetworkX%203.6-success.svg)]()
-[![LLM](https://img.shields.io/badge/GenAI-Groq%20Free%20Tier-orange.svg)]()
-[![Verified](https://img.shields.io/badge/Benchmark-1030%20MB%2Fs%20%40%20300MB%20RAM-blue.svg)]()
+[![LLM](https://img.shields.io/badge/GenAI-Groq%20Free%20Tier%20(optional)-orange.svg)]()
+[![Real data](https://img.shields.io/badge/9.1M%20events-100%25%20%2F%20100%25%20%2F%200%25-brightgreen.svg)]()
 
 ---
 
-## 📌 Read this first — decisions already made and verified
+## 👉 The project is built. Start in [`chronopath/`](chronopath/)
 
-Everything in this README was **tested on the actual demo machine** (16 GB RAM, 5-core
-Dell, Windows 11, Python 3.14.2) before being written down. Numbers quoted are measured,
-not estimated. Where something is an extrapolation, it says so.
+This file is the **pre-build planning document** — the decisions made before any
+code was written. It is kept for the record. The built system, its measured
+results on the organisers' real data, and the current numbers live here:
+
+| Read this | For |
+|---|---|
+| **[`chronopath/README.md`](chronopath/README.md)** | The built system, in full |
+| **[`chronopath/PITCH.md`](chronopath/PITCH.md)** | **The pitch for judges** |
+| [`chronopath/START_HERE.md`](chronopath/START_HERE.md) | No security background? Start here |
+| [`chronopath/docs/results_2.0.md`](chronopath/docs/results_2.0.md) | Every 2.0 measurement, with method |
+| [`chronopath/SETUP.md`](chronopath/SETUP.md) | Install and run |
+
+### What actually shipped, measured on the organisers' `firex-10G.log`
+
+| Metric | Result |
+|---|---|
+| Events processed | **9,125,382** (6.54 GB) |
+| Detection rate | **100%** |
+| Correct ATT&CK labels | **100%** |
+| False alarm rate | **0%** |
+| Peak memory | **813 MB** detection, 590 MB for the 2.0 layer |
+| Open one incident | **4 ms** |
+
+**ChronoPath 2.0** adds an evidence-and-gap layer on top: graded link evidence
+with raw log lines, a gap ledger that states what the data cannot show, a
+measured blind-window check, and a respond-now panel. See the pitch.
+
+### Two planning assumptions below that turned out to be wrong
+
+Recorded rather than quietly edited, because the corrections are instructive:
+
+- **`llama-3.3-70b-versatile` returns HTTP 404** on the free tier, despite
+  appearing in Groq's production model list. `models.list()` showed no Llama
+  chat models available to us at all. We ship `openai/gpt-oss-120b` instead —
+  and found that it hides a `reasoning` field which shares the token budget, so
+  `max_tokens` has to be generous or the content comes back empty.
+- **"1030 MB/s at 300 MB peak RAM"** was measured on a 400 MB sample. On the
+  real 6.54 GB file with 12 rules the honest figure is ~99 s end to end at
+  813 MB peak. The memory claim held; the throughput figure did not survive
+  contact with a file 16× larger.
+
+---
+
+## 📌 The original plan — decisions made and verified before building
+
+Everything in this section was **tested on the actual demo machine** (16 GB RAM,
+5-core Dell, Windows 11, Python 3.14.2) before being written down.
 
 | Decision | Choice | Why |
 |---|---|---|
 | **Data tier** | **15 GB (Core)** | See "Why 15 GB" below — it is the *only* tier that fits the demo box safely. |
 | Language | Python 3.14.2 | Team knows Python; whole stack verified to install on it. |
-| Scan engine | DuckDB 2.0.0 | Streams from disk. **Measured 1030 MB/s at 300 MB peak RAM.** |
+| Scan engine | DuckDB 2.0.0 | Streams from disk. Memory stays flat, not proportional to file size. |
 | Graph | NetworkX 3.6.1 | Pure Python, no server, no Docker, no Neo4j licence. |
 | UI | Streamlit 1.66.1 + streamlit-agraph | Browser UI in ~40 lines. |
-| Narrative | Groq free API | `llama-3.3-70b-versatile` — confirmed live on Groq's model list. |
+| Narrative | Groq free API | ⚠️ *Planned `llama-3.3-70b-versatile`; see correction above.* |
 | Cost | **₹0** | Every component is free/open-source. No cloud, no card. |
 
 ---

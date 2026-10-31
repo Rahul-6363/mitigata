@@ -207,9 +207,23 @@ python src/api.py --port 9000
 | `GET /stats` | corpus summary |
 | `GET /metrics` | timing vs the PRD investigation-speed target |
 
+**ChronoPath 2.0 endpoints** (run `scripts/run_cp2.py` first):
+
+| Endpoint | Returns |
+|---|---|
+| **`GET /evidence/1`** | **why each pair of events was linked, graded, plus the links we refused** |
+| **`GET /gaps/1`** | **what the data cannot show: basis, impact, evidence to request** |
+| `GET /separation` | for every pair of incidents, why they are not one incident |
+| `GET /indicators/1` | indicators with first/last seen across the whole data set |
+| `GET /sources` | provenance: SHA-256, format, time range, clock check, streams |
+
+Ids are tolerant — `/gaps/1`, `/gaps/INC-01` and `/gaps/inc-1` all work.
+
 ```bash
 curl http://localhost:8000/incidents/1/path
-curl http://localhost:8000/metrics      # measured 5.19 ms; "Great" bar is 500 ms
+curl http://localhost:8000/metrics      # measured 4.0 ms; "Great" bar is 500 ms
+curl http://localhost:8000/evidence/1   # the Rakes -> svc_backup30 identity pivot
+curl http://localhost:8000/gaps/1       # what we cannot tell you about INC-01
 ```
 
 The API uses only the Python standard library, so it adds no dependencies and
@@ -241,15 +255,59 @@ python scripts/benchmark.py
 
 ---
 
-## 6 · Running on the real 15 GB data set
+## 6 · Running on the real data set
 
 Nothing in the code changes — only the input path and, optionally, the memory cap.
+The format is auto-detected (FortiGate syslog, ECS JSON, or flat JSON).
+
+### The organisers' `firex-10G.log` — the full run, as measured
 
 ```bash
-python src/parser.py --input /path/to/real_logs.ndjson --memory-limit 8GB
-python src/graph_engine.py
-streamlit run src/app.py
+# 1. Detection: 6.54 GB, 9,125,382 events -> 373,061 detections  (~99 s, 813 MB)
+python src/parser.py --input D:/firex-10G.log --db firex.db --memory-limit 6GB
+
+# 2. The ChronoPath 2.0 evidence layer: coverage, links, gaps, indicators (~51 s)
+python scripts/run_cp2.py --db firex.db --input D:/firex-10G.log
+
+# 3. Score it against the reconstructed ground truth
+python scripts/evaluate.py --db firex.db --truth data/ground_truth_firex.json
+#    -> 100% detection / 100% labels / 0% false alarms, 5 incidents
+
+# 4. Look at it
+streamlit run src/app.py        # 9 tabs
+python src/api.py               # or the REST API
 ```
+
+**Note the `--db firex.db`.** Each input gets its own database so runs cannot
+overwrite each other. The dashboard and API open the **most recently written**
+database automatically, or you can be explicit:
+
+```bash
+CHRONOPATH_DB=firex.db streamlit run src/app.py      # bash
+$env:CHRONOPATH_DB="firex.db"; streamlit run src/app.py   # PowerShell
+```
+
+### The 2.0 layer, step by step
+
+`run_cp2.py` does all of this in the right order, but the steps work alone:
+
+```bash
+# Coverage + provenance only (Task 1): 12 streams, SHA-256, the clock check
+python scripts/build_coverage.py --input D:/firex-10G.log --db firex.db
+
+# The controlled experiment (Task 6): remove a host, measure the degradation
+python scripts/experiment_remove_host.py
+
+# The test suite, including the regression gate
+python tests/test_chronopath2.py
+```
+
+**Order matters** if you run them by hand: `build_coverage.py` must come before
+the gap ledger, because the blind-window check reads its volume table and the
+gap ledger reads its fingerprint. `run_cp2.py` exists so you do not have to
+remember that.
+
+### Scaling to the full 15 GB tier
 
 **Before you start a 15 GB run, check three things:**
 
@@ -322,6 +380,29 @@ instead — see the brute-force rule in `rules.yaml` for the pattern.
 | Disk fills during a 15 GB run | Spill files | Clear `tmp_spill/`, free space, re-run |
 | Garbled characters in terminal | Windows legacy code page | Cosmetic only; `chcp 65001` fixes it |
 | Port 8501 already in use | Another Streamlit running | `streamlit run src/app.py --server.port 8502` |
+| Accuracy suddenly reads 0% | **The answer key does not match the database** | See the note below — the most confusing failure in this project |
+| Dashboard shows the wrong data | It opens the most recent database | Set `CHRONOPATH_DB=firex.db` explicitly |
+| 2.0 tabs say "layer has not been built" | `run_cp2.py` not run for this database | `python scripts/run_cp2.py --db <db> --input <log>` |
+| Blind-window check returns `COVERAGE_UNKNOWN` | No coverage pass, or the file spans too few days to form a control | Run `build_coverage.py`; on a short file this is the honest answer |
+
+### ⚠️ The answer-key trap
+
+**`scripts/generate_sample.py` and `scripts/prepare_edr.py` both write
+`data/ground_truth.json`.** Running one overwrites the other's answer key. The
+symptom is alarming and misleading: accuracy drops to **0% detection with 100%
+false alarms**, as though the detector broke, when in fact it is being graded
+against a different data set's attack.
+
+Each input needs its database *and* its truth file paired correctly:
+
+| Input | Database | Truth file |
+|---|---|---|
+| `firex-10G.log` | `firex.db` | `data/ground_truth_firex.json` |
+| `data/edr_ready.json` | `edr.db` | `data/ground_truth.json` *(written by `prepare_edr.py`)* |
+| Flat sample | `chronopath.db` | `data/ground_truth.json` *(written by `generate_sample.py`)* |
+
+If you regenerate the flat sample and then want to re-score the EDR run, re-run
+`prepare_edr.py` to restore its key — or keep a copy first.
 
 ---
 
@@ -351,6 +432,31 @@ python scripts/benchmark.py
   RESULT: peak memory is BELOW the file size. Streamed, not loaded.
 ```
 
+### Checking the ChronoPath 2.0 layer
+
+```bash
+python tests/test_chronopath2.py
+```
+
+Expected tail — **all 12 must pass**, and the last two are the regression gate
+that proves 2.0 did not change the 1.x results:
+
+```
+  test_regression_gate_unchanged
+    firex.db: 373,061 detections, 5 incidents -- matches baseline
+    edr.db: 26,119 detections, 1 incidents -- matches baseline
+  test_rejected_values_are_not_accepted_links
+    edr.db: 3 rejected value(s), none reused as an accepted link
+==============================================================
+  all 12 passed
+```
+
+The tests skip gracefully where a database is missing, so run the pipeline for
+at least one input first. If `test_regression_gate_unchanged` fails, the
+expected numbers are in [`docs/baseline_before_2.0.md`](docs/baseline_before_2.0.md)
+— a mismatch means something in the 2.0 layer touched the engine, which it must
+never do.
+
 ---
 
 ## 10 · File map
@@ -358,21 +464,45 @@ python scripts/benchmark.py
 ```
 chronopath/
 ├── README.md              Problem, architecture, benchmarks, demo script
+├── PITCH.md               The pitch for judges                       ← 2.0
 ├── SETUP.md               This file
 ├── READTHIS.md            Learning guide — concepts + YouTube links
+├── START_HERE.md          Beginner's guide, no security background needed
 ├── requirements.txt       Pinned dependencies
 ├── rules.yaml             Detection rules (edit to add detections — B-4)
+├── rules_ecs.yaml         Rules for the EDR generator's ECS format
+├── rules_fortigate.yaml   Rules for real FortiGate syslog
 ├── assets.yaml            Host/privilege inventory (powers look-ahead — FR-6)
 ├── run_demo.py            Runs the whole pipeline in one command
 ├── data/                  Generated logs + ground truth (gitignored)
+├── docs/                                                             ← 2.0
+│   ├── baseline_before_2.0.md  The 1.x numbers the regression gate protects
+│   └── results_2.0.md          Every 2.0 measurement, with its method
+├── tests/
+│   └── test_chronopath2.py     12 tests incl. the regression gate    ← 2.0
 ├── scripts/
 │   ├── generate_sample.py Makes logs with a planted attack
+│   ├── prepare_edr.py     Makes the organisers' EDR output realistic
+│   ├── discover_firex.py  Derives ground truth by rarity analysis
 │   ├── benchmark.py       Proves the streaming/memory claim
-│   └── evaluate.py        Scores accuracy against ground truth
+│   ├── evaluate.py        Scores accuracy against ground truth
+│   ├── build_coverage.py       Telemetry coverage + provenance       ← 2.0
+│   ├── run_cp2.py              The whole 2.0 layer, one command      ← 2.0
+│   └── experiment_remove_host.py  Controlled remove-a-host test      ← 2.0
 └── src/
     ├── parser.py          DuckDB streaming detection      (FR-1,2,3)
+    ├── ecs_adapter.py     Reads ECS JSON as flat columns
+    ├── fortigate_adapter.py  Reads FortiGate syslog as flat columns
     ├── graph_engine.py    Correlation, path, look-ahead   (FR-4,5,6)
-    └── app.py             Streamlit dashboard + Groq      (FR-5,6,7)
+    ├── pivot.py           Anomaly ranking (threat hunting)
+    ├── api.py             REST API, stdlib only           (FR-7)
+    ├── app.py             Streamlit dashboard + Groq      (FR-5,6,7)
+    └── chronopath2/            The 2.0 evidence & gap layer          ← 2.0
+        ├── streams.py          Coverage + provenance      (Task 1)
+        ├── blind_window.py     Did the blinding work?     (Task 2)
+        ├── link_evidence.py    Graded links + raw lines   (Task 3)
+        ├── gaps.py             The gap ledger             (Task 4)
+        └── respond.py          Indicators + containment   (Task 5)
 ```
 
 ---
