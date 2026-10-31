@@ -731,7 +731,11 @@ st.divider()
 
 with tab_story:
     st.subheader("Incident report")
-    summary = graph_engine.summarise_for_llm(incident)
+    links = cp2_read(
+        db_signature(),
+        "SELECT grade, reason FROM cp2_links WHERE incident_id = ? "
+        "ORDER BY time_delta_s", [incident["id"]])
+    summary = graph_engine.summarise_for_llm(incident, links)
     report, status = generate_report(summary, incident["id"])
 
     if status == "ok":

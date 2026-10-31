@@ -141,11 +141,7 @@ def fortigate_source_expr(log_path):
     #
     # This is the single setting that decides whether the tool works on the
     # real data set at all -- a sample-only test would never have found it.
-    reader = (
-        f"read_csv('{log_path}', delim='\\x07', header=false, "
-        f"columns={{'line': 'VARCHAR'}}, ignore_errors=true, "
-        f"quote='', escape='', strict_mode=false)"
-    )
+    reader = _reader(log_path)
 
     return f"""(
         SELECT
@@ -186,6 +182,46 @@ def fortigate_source_expr(log_path):
             FROM {reader}
         )
         WHERE fg_date <> ''
+    )"""
+
+
+def _reader(log_path):
+    """The raw one-column line reader shared by every FortiGate scan."""
+    return (
+        f"read_csv('{log_path}', delim='\\x07', header=false, "
+        f"columns={{'line': 'VARCHAR'}}, ignore_errors=true, "
+        f"quote='', escape='', strict_mode=false)"
+    )
+
+
+def fortigate_volume_expr(log_path):
+    """
+    A lean sub-select with only `timestamp`, `fg_type` and `fg_subtype`, for the
+    coverage scan, which needs nothing else.
+
+    Same rows and values as fortigate_source_expr, about 5x cheaper. Every
+    well-formed line starts `date=YYYY-MM-DD time=HH:MM:SS `, so those come
+    from fixed offsets instead of two regexes per line. A line that does not
+    have exactly that shape falls back to the regexes, so nothing changes for
+    malformed lines; it is only faster for the 37 million that are fine.
+    """
+    if "'" in log_path:
+        raise ValueError("Log path may not contain a single quote.")
+    fixed = ("starts_with(line, 'date=') AND substr(line, 16, 6) = ' time=' "
+             "AND substr(line, 30, 1) = ' '")
+    date_re = r"regexp_extract(line, 'date=(\S+)', 1)"
+    time_re = r"regexp_extract(line, 'time=(\S+)', 1)"
+    return f"""(
+        SELECT
+            CASE WHEN {fixed}
+                 THEN substr(line, 6, 10) || 'T' || substr(line, 22, 8)
+                 WHEN {date_re} <> '' AND {time_re} <> ''
+                 THEN {date_re} || 'T' || {time_re}
+                 ELSE '' END                                   AS timestamp,
+            regexp_extract(line, '{_esc(FIELD_PATTERNS["fg_type"])}', 1)    AS fg_type,
+            regexp_extract(line, '{_esc(FIELD_PATTERNS["fg_subtype"])}', 1) AS fg_subtype
+        FROM {_reader(log_path)}
+        WHERE ({fixed}) OR {date_re} <> ''
     )"""
 
 

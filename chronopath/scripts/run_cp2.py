@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import duckdb  # noqa: E402
 
+import fortigate_adapter  # noqa: E402
 import graph_engine  # noqa: E402
 import parser as cp_parser  # noqa: E402
 from chronopath2 import blind_window, gaps, link_evidence, respond, streams  # noqa: E402
@@ -87,10 +88,25 @@ def main():
               f"{'':12}{correlate_s:>6.1f}s")
 
         # --- 2. Telemetry coverage and provenance (Task 1) ----------------
-        if args.input and not args.skip_coverage:
+        if args.input and streams.has_current_record(
+                con, args.input, os.path.basename(args.input)):
+            # The parser records coverage during its detection scan, so the
+            # usual path reads nothing here.
+            n = con.execute(
+                "SELECT streams_found, total_rows FROM cp2_source_fingerprint "
+                "WHERE source = ?", [os.path.basename(args.input)]).fetchone()
+            print(f"  [2/6] coverage        {n[0]} streams, {n[1]:,} events"
+                  f"  (recorded in the detection scan)")
+            totals["streams"] = n[0]
+        elif args.input and not args.skip_coverage:
             t0 = time.time()
             log_format = cp_parser.detect_format(args.input)
-            src = cp_parser.source_expr(args.input, log_format)
+            # Coverage reads only timestamp and type/subtype, so FortiGate gets
+            # a lean reader that skips the other ~25 field regexes.
+            if log_format == "fortigate":
+                src = fortigate_adapter.fortigate_volume_expr(args.input)
+            else:
+                src = cp_parser.source_expr(args.input, log_format)
             fp = streams.record_source(
                 con, args.input, os.path.basename(args.input), log_format, src)
             print(f"  [2/6] coverage        {fp['streams']} streams, "
