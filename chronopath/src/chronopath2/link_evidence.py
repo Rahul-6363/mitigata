@@ -461,21 +461,38 @@ def enrich_from_source(log_path, incidents, max_scan_hits=None):
     if not wanted:
         return 0
 
+    # How many detections we are hoping to fill, so the scan can stop early.
+    want_total = sum(len(v) for v in wanted.values())
     filled = 0
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            # Pre-filter on the (date, time) pair ALONE before touching a regex.
+            #
+            # This matters enormously and the first version got it wrong. The
+            # comment claimed a cheap pre-filter, but the code ran
+            # re.search(r'user="..."') on every line BEFORE testing the date --
+            # so 9.1 million regex searches ran to serve 10 lookups. Measured,
+            # that took 1,368 seconds. Deriving the timestamp key from fixed
+            # string offsets first, and only running the regexes on the handful
+            # of lines whose timestamp we actually want, brings it back to a
+            # single sequential read.
+            #
+            # `want_times` holds just the (date, time) pairs, so the common
+            # case is one tuple hash and one set lookup per line.
+            want_times = {(d, t) for d, t, _ in wanted}
             for line in f:
                 if not line.startswith("date="):
                     continue
-                # Cheap pre-filter before the regexes: the date is at a fixed
-                # offset, so a slice rejects the vast majority of 9.1 M lines
-                # without any pattern matching at all.
+                # Fixed offsets in the FortiGate preamble:
+                #   date=YYYY-MM-DD time=HH:MM:SS
+                #   0123456789...
                 date_part = line[5:15]
                 time_part = line[21:29]
+                if (date_part, time_part) not in want_times:
+                    continue
                 m_user = re.search(r'user="([^"]*)"', line)
                 user = m_user.group(1) if m_user else ""
-                key = (date_part, time_part, user)
-                targets = wanted.get(key)
+                targets = wanted.get((date_part, time_part, user))
                 if not targets:
                     continue
                 m_msg = _MSG_RE.search(line)
@@ -486,6 +503,11 @@ def enrich_from_source(log_path, incidents, max_scan_hits=None):
                             e["raw_msg"] = m_msg.group(1)
                         filled += 1
                 if max_scan_hits and filled >= max_scan_hits:
+                    break
+                # Stop as soon as every detection has its line. The planted
+                # events sit early in a 6.5 GB file, so there is no reason to
+                # read the remaining gigabytes once they are all found.
+                if filled >= want_total:
                     break
     except OSError:
         return filled

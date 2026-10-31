@@ -373,6 +373,62 @@ rules:
       attributed to an attack technique.
 
   # ---------------------------------------------------------------------------
+  # PASSWORD SPRAYING -- a technique the brute-force rule above cannot express.
+  #
+  # ADDED after an independent coverage review found it. "Sustained Admin Brute
+  # Force" groups by src_ip and counts attempts, which answers "is one address
+  # hammering us?" It cannot answer the different and more diagnostic question:
+  # "is one address trying MANY DIFFERENT ACCOUNTS?"
+  #
+  # Those are distinct ATT&CK techniques with distinct responses:
+  #   T1110.001 Password Guessing -- many passwords against ONE account.
+  #             Response: lock that account, it is targeted.
+  #   T1110.003 Password Spraying -- ONE common password against MANY accounts,
+  #             deliberately staying under per-account lockout thresholds.
+  #             Response: the lockout policy did not fire and cannot save you;
+  #             look for the ONE account that succeeded.
+  #
+  # Measured on this file, the distribution of distinct usernames per
+  # (source address, hour) has a clean natural break:
+  #
+  #     p50   10        p95   31
+  #     p75   17        p99   43      <- ordinary noise ends here
+  #     p90   26        p99.9 825     <- the spray campaign
+  #     max   839 distinct usernames from one address in one hour
+  #
+  # 264 external addresses are each making ~8,000 failed admin logins against
+  # 956 distinct usernames (admin, root, administrator, administrador, usuario,
+  # test). That is a distributed spray campaign, and before this rule the whole
+  # of it was labelled generic T1110.
+  #
+  # The threshold is 50, chosen from that break rather than tuned: it sits
+  # above p99 (43) and below the campaign cluster (825+). It is also STABLE --
+  # 50, 100, 200, 400 and 600 all yield 157 detections, which is how you can
+  # tell the cluster is real and not an artefact of where the line was drawn.
+  # At 20 it would yield 5,114 and swamp the output with ordinary noise.
+  - name: "Password Spraying Against Many Accounts"
+    type: aggregate
+    mitre_technique: "T1110.003"
+    mitre_name: "Brute Force: Password Spraying"
+    kill_chain_stage: "Credential Access"
+    severity: 8
+    sql_condition: "fg_logdesc = 'Admin login failed'"
+    # Failed logins prove an attempt, not access. Triage keeps this out of the
+    # incident list unless it correlates with a success -- which is exactly
+    # what makes a spray dangerous, so the pairing matters.
+    outcome: attempted
+    group_by: ["src_ip"]
+    bucket_minutes: 60
+    metric: 'COUNT(DISTINCT "user")'
+    metric_label: "Distinct accounts targeted"
+    having: 'COUNT(DISTINCT "user") >= 50'
+    description: >
+      One external address attempted to authenticate against 50 or more
+      different administrative accounts within an hour. This is spraying, not
+      guessing: it is designed to stay below per-account lockout thresholds, so
+      an unchanged lockout policy is not evidence that it failed. The account
+      to hunt for is the one that succeeded.
+  # ---------------------------------------------------------------------------
   # DISABLED BY MEASUREMENT, NOT BY OVERSIGHT.
   #
   # This rule is correct in principle: an internal host ALLOWED to reach a

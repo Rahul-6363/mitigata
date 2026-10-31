@@ -19,7 +19,7 @@ Recorded: 2026-10-31. Git tag: `baseline-1.x`.
 
 ## Regression gate — the numbers that must not change
 
-### FortiGate (`firex.db`, 373,061 detections → 5 incidents)
+### FortiGate (`firex.db`, 373,239 detections → 5 incidents)
 
 ```
 python scripts/evaluate.py --db firex.db --truth data/ground_truth_firex.json
@@ -68,7 +68,7 @@ All 8 steps in one incident, ranked #1 — exactly as the build brief predicted.
 | Parse time | ~99 s (12 rules) | 4.6 s (10 rules) |
 | Throughput | ~68 MB/s with rules | 79 MB/s |
 | Peak RSS | 813 MB (6 GB cap) | < 500 MB |
-| Detections written | 373,061 | 26,119 |
+| Detections written | 373,239 | 26,119 |
 
 ## Database state before 2.0
 
@@ -116,3 +116,65 @@ error. So the wall-clock fields are effectively UTC and the `tz` tag does not
 apply to them. Our pipeline uses `date`/`time`, which is internally consistent
 and agrees with `eventtime`-as-UTC. This is recorded in the source fingerprint
 rather than silently assumed.
+
+
+---
+
+## Baseline revision — 2026-10-31, after the accuracy review
+
+The FortiGate detection count moved from **373,061 to 373,239 (+178)** and the
+EDR top incident's risk score from **92.8 to 92.5**. Both changes are
+deliberate, and both are improvements; the gate was updated only after
+establishing why each number moved.
+
+### +178 detections: a technique we could not previously express
+
+`T1110.003 Password Spraying` was added. The existing brute-force rule groups
+by source address and counts attempts, which answers *"is one address hammering
+us?"* It cannot answer the more diagnostic question *"is one address trying many
+different accounts?"* -- a different ATT&CK technique with the opposite
+response, because spraying is designed to stay under per-account lockout
+thresholds.
+
+Measured on this file: **264 external addresses, ~8,000 failed admin logins
+each, against 956 distinct usernames**, with up to **839 distinct usernames
+from one address in a single hour**. The distribution of distinct usernames per
+(address, hour) breaks cleanly -- p99 is 43, then it jumps to 825 -- so the
+threshold of 50 sits in the gap rather than being tuned. It is stable: 50, 100,
+200, 400 and 600 all yield 157 buckets.
+
+All four accuracy metrics are unchanged (100% / 100% / 0%, 5 incidents): the new
+detections carry `outcome: attempted`, so triage correctly keeps them out of the
+incident list as blocked threats rather than inventing 178 false incidents.
+
+### Risk 92.8 → 92.5: `event_count` was holding a byte count
+
+`event_count` was being set to the rule's reporting metric rather than the row
+count. For rules with a custom metric this was badly wrong, in the direction
+that misleads:
+
+| Rule | metric | `event_count` before | after |
+|---|---|---|---|
+| EDR exfiltration (T1041) | `SUM(bytes_out)` | **58,800,000** | **14** |
+| FortiGate VPN (T1133) | `COUNT(DISTINCT src_ip)` | 2 | **4** |
+
+The first reported 58.8 million "raw alerts merged" for a single detection --
+bonus B-3 inflated by six orders of magnitude. The second understated the
+evidence: `keerat.ghughal` has four VPN tunnels from two countries, and the
+analyst was told two events.
+
+The risk score consumes `raw_alert_count`, so correcting the input moved the EDR
+score slightly. The metric still reaches the analyst through `message`
+("Bytes transferred: 58800000"), which is where a number that is not a row count
+belongs.
+
+### The numbers the gate now protects
+
+| | FortiGate | EDR |
+|---|---|---|
+| Detections | **373,239** | **26,119** |
+| Incidents | **5** | **1** |
+| Detection rate | 100.0% | 100.0% |
+| Correct ATT&CK labels | 100.0% | 100.0% |
+| False alarm rate | 0.0% | 0.0% |
+| Path rebuilt | NO *(expected -- five unlinked actors)* | YES, ranked #1 |

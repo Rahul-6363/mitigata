@@ -47,7 +47,7 @@ EDR_DB = os.path.join(ROOT, "edr.db")
 
 # The regression gate, from docs/baseline_before_2.0.md.
 BASELINE = {
-    FIREX_DB: {"incidents": 5, "detections": 373061},
+    FIREX_DB: {"incidents": 5, "detections": 373239},
     EDR_DB: {"incidents": 1, "detections": 26119},
 }
 

@@ -431,7 +431,25 @@ def _aggregate_sql(rule, src, group_clause, group_cols):
             '{escape(rule['mitre_name'])}'       AS mitre_name,
             '{escape(rule['kill_chain_stage'])}' AS kill_chain_stage,
             {int(rule['severity'])}              AS severity,
-            {metric}                             AS event_count,
+            -- event_count IS ALWAYS THE ROW COUNT, never the rule's metric.
+            --
+            -- This used to be `{{metric}}`, which was wrong whenever a rule
+            -- reported something other than a count. The VPN rule's metric is
+            -- COUNT(DISTINCT src_ip), so keerat.ghughal's FOUR tunnel events
+            -- were recorded as event_count = 2 -- the number of countries, not
+            -- the number of events.
+            --
+            -- That breaks bonus B-3 ("show how many raw alerts were merged
+            -- into each incident") in the direction that matters: it
+            -- understates the evidence behind a finding. An analyst told "2
+            -- events merged" has no reason to look for the other two, and the
+            -- repetition is the point -- a credential used four times from two
+            -- countries is worse than one used twice.
+            --
+            -- The metric still reaches the analyst: it is in `message` above,
+            -- labelled ("Distinct source IPs: 2"), which is where a number
+            -- that is not a row count belongs.
+            COUNT(*)                             AS event_count,
             '{escape(rule.get('outcome', 'observed'))}' AS outcome
         FROM {src}
         WHERE {rule['sql_condition']}
