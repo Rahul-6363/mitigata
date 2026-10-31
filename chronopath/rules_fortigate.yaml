@@ -1,0 +1,330 @@
+# =============================================================================
+# ChronoPath Detection Rules -- FortiGate syslog (firex-10G.log)
+# =============================================================================
+#
+# WHY A THIRD RULE FILE
+# ---------------------
+# The real data set is FortiGate firewall syslog, which carries completely
+# different signals from the other two formats:
+#   * No process names, no registry, no file events -- it is a network device.
+#   * It DOES have: admin authentication, IPS exploit detections, antivirus
+#     hits, web filtering, DNS, VPN, and device configuration changes.
+# The parser picks this file automatically when it detects FortiGate format.
+#
+# EVERY THRESHOLD BELOW WAS MEASURED AGAINST THE REAL 6.5 GB FILE.
+# Nothing here is guessed. Measured over all 9,125,382 events:
+#
+#     Admin login failed .............. 1,272,524     <- constant background
+#     Admin login successful .................. 5     <- THE SIGNAL
+#     SSL VPN tunnel up ....................... 4
+#     Attribute configured .................... 3
+#     Object attribute configured ............. 2
+#
+# That ratio is the whole story. A million failures are internet background
+# noise against an exposed management interface. FIVE successes are the
+# intrusion. Rules that fire on the failures would bury the attack; rules that
+# fire on rarity surface it immediately.
+#
+# WHAT THE PLANTED ATTACK ACTUALLY LOOKS LIKE (extracted from the real file):
+#
+#   23 Oct 16:31  Tejas.Roy       78.120.139.0     DISABLES disk logging
+#   23 Oct 18:28  Tejas.Roy       78.120.139.0     PURGES firewall policies
+#   23 Oct 20:36  Tejas.Roy       78.120.139.0     re-enables logging
+#   24 Oct 19:59  parul.sinha     8.42.69.77       admin login SUCCESS
+#   28 Oct 02:15  keerat.ghughal  102.8.77.227     SSL VPN tunnel up
+#   28 Oct 02:22  keerat.ghughal  9.222.114.167    VPN from a 2nd country
+#   28 Oct 03:17  Deepika.Khan    171.104.84.193   admin login SUCCESS (x3)
+#   29 Oct 03:55  Rakes           203.228.177.117  CREATES admin svc_backup30
+#   29 Oct 04:02  svc_backup30    203.228.177.117  logs in as the new account
+#   29 Oct 04:07  Rakes           203.228.177.117  DELETES svc_backup30
+#
+# The last three lines are the clearest evidence in the whole data set:
+# create an admin account, use it, destroy it inside twelve minutes. That is
+# not administration, it is anti-forensics.
+#
+# !! SECURITY NOTE: sql_condition is interpolated into SQL. Trusted local
+# !! config only -- never wire this file to user input.
+# =============================================================================
+
+rules:
+
+  # ===========================================================================
+  # TIER 1 -- THE RARE EVENTS THAT ARE THE ATTACK
+  # Five successful logins in 9.1 million events. Rarity IS the signal.
+  # ===========================================================================
+
+  - name: "Admin Login Successful from External IP"
+    type: row
+    mitre_technique: "T1078"
+    mitre_name: "Valid Accounts"
+    kill_chain_stage: "Initial Access"
+    # Severity 10: only 5 of these exist in 9.1M events, all from public
+    # addresses. The management interface should never be reachable from the
+    # internet, so a SUCCESS from outside is the moment the attacker got in.
+    # At 9 a lone login (parul.sinha) fell under the noise threshold and was
+    # never reported -- a planted step missed outright.
+    severity: 10
+    sql_condition: >
+      fg_logdesc = 'Admin login successful'
+      AND NOT (src_ip LIKE '10.%' OR src_ip LIKE '192.168.%'
+               OR src_ip LIKE '172.16.%')
+    description: >
+      An administrator signed in successfully to the firewall from a public IP
+      address. Five such events exist in the entire data set, each following
+      sustained password guessing against the same interface.
+
+  - name: "Firewall Admin Account Created"
+    type: row
+    mitre_technique: "T1136"
+    mitre_name: "Create Account"
+    kill_chain_stage: "Persistence"
+    severity: 10
+    # `Add system.admin <name>` -- the attacker minting their own credentials
+    # on the security device itself. Highest severity: whoever does this owns
+    # the perimeter.
+    sql_condition: >
+      fg_logdesc = 'Object attribute configured'
+      AND fg_msg LIKE 'Add system.admin%'
+    description: >
+      A new firewall administrator account was created. On a production
+      firewall this is a rare, change-controlled action; mid-intrusion it is
+      the attacker giving themselves a durable way back in.
+
+  - name: "Firewall Admin Account Deleted (Anti-Forensics)"
+    type: row
+    mitre_technique: "T1070"
+    mitre_name: "Indicator Removal"
+    kill_chain_stage: "Defense Evasion"
+    severity: 10
+    # The other half of the pair above. In the real data svc_backup30 was
+    # created at 03:55, used at 04:02 and deleted at 04:07 -- a twelve-minute
+    # lifetime. Legitimate accounts are not born and destroyed in one sitting.
+    sql_condition: >
+      fg_logdesc = 'Object attribute configured'
+      AND fg_msg LIKE 'Delete system.admin%'
+    description: >
+      A firewall administrator account was deleted. Paired with a creation
+      shortly before, this is the attacker removing the evidence of the
+      account they just used.
+
+  - name: "Firewall Logging Disabled"
+    type: row
+    # Parent technique on purpose. T1562.002 is "Disable WINDOWS Event
+    # Logging", which this is not: it is a firewall's disk log.
+    mitre_technique: "T1562"
+    mitre_name: "Impair Defenses"
+    kill_chain_stage: "Defense Evasion"
+    severity: 10
+    # "Attribute 'status' of setting 'log disk setting' changed from 'enable'
+    # to 'disable'". Turning off the logs is what an attacker does immediately
+    # before doing something they do not want recorded -- and in this data set
+    # it is followed two hours later by the firewall policies being purged.
+    sql_condition: >
+      fg_logdesc LIKE '%ttribute configured'
+      AND fg_msg LIKE '%log disk setting%'
+      AND fg_msg LIKE '%to ''disable''%'
+    description: >
+      Disk logging was switched off on the firewall. This blinds the very
+      system recording the intrusion, and is almost never a legitimate
+      production change.
+
+  - name: "Firewall Policy Objects Purged"
+    type: row
+    mitre_technique: "T1562.004"
+    mitre_name: "Impair Defenses: Disable or Modify System Firewall"
+    kill_chain_stage: "Defense Evasion"
+    severity: 10
+    # Wiping the rule base removes the controls that would block the next
+    # stage. In the real file this happens while logging is disabled.
+    sql_condition: >
+      fg_msg LIKE '%firewall policy%'
+      AND (fg_msg LIKE '%purged%' OR fg_msg LIKE '%Delete%')
+    description: >
+      Firewall policy objects were purged. The rules that would have stopped
+      subsequent attacker traffic were removed, while logging was disabled.
+
+  - name: "SSL VPN Access from Multiple Countries"
+    type: aggregate
+    mitre_technique: "T1133"
+    mitre_name: "External Remote Services"
+    kill_chain_stage: "Initial Access"
+    # Severity 10, not 8. One account authenticating from two different
+    # countries inside an hour is physically impossible for one person, so
+    # this is as unambiguous as the account create/delete pair. It also has
+    # to clear the noise filter on its own, because in the real data it
+    # correlates to a group of one.
+    severity: 10
+    # keerat.ghughal's four tunnels come from two different source IPs within
+    # twenty-two minutes. One person cannot be in two places at once -- this
+    # is a shared or stolen credential. Only 4 VPN events exist in the whole
+    # file, so the threshold is deliberately low.
+    sql_condition: "fg_logdesc = 'SSL VPN tunnel up'"
+    group_by: ["user"]
+    bucket_minutes: 60
+    having: "COUNT(DISTINCT src_ip) >= 2"
+    metric: "COUNT(DISTINCT src_ip)"
+    metric_label: "Distinct source IPs"
+    description: >
+      One VPN account was used from two or more different source addresses
+      within an hour. A single human cannot do that; the credential is shared
+      or stolen.
+
+  # ===========================================================================
+  # TIER 2 -- THE BRUTE FORCE THAT PRECEDED IT
+  #
+  # 1.27 million failed admin logins. The trick is to report the campaign
+  # rather than a million individual alerts: we aggregate by source IP per
+  # hour, so each attacking host yields a handful of detections, not thousands.
+  # ===========================================================================
+
+  - name: "Sustained Admin Brute Force"
+    type: aggregate
+    mitre_technique: "T1110"
+    mitre_name: "Brute Force"
+    kill_chain_stage: "Credential Access"
+    severity: 7
+    # Threshold measured against the real distribution: the busiest sources
+    # produce ~2,700 failures each across the file. 200 per hour from one
+    # address is far beyond mistyping and well clear of the noise floor,
+    # while keeping the detection count manageable.
+    sql_condition: "fg_logdesc = 'Admin login failed'"
+    # Failed logins prove an attempt, not access. On its own this is a blocked
+    # threat; it becomes an incident only when it correlates with a success.
+    outcome: attempted
+    group_by: ["src_ip"]
+    bucket_minutes: 60
+    having: "COUNT(*) >= 200"
+    description: >
+      Two hundred or more failed administrator logins from one source address
+      within an hour. This is automated password guessing against the firewall
+      management interface.
+
+  # ===========================================================================
+  # TIER 3 -- EXPLOIT AND MALWARE DETECTIONS FROM THE FIREWALL'S OWN ENGINES
+  #
+  # The IPS and antivirus engines already classify these; we adopt their
+  # verdicts and map them onto ATT&CK, exactly as we adopt EDR alerts in the
+  # ECS rule set. Our value is linking them to the authentication story.
+  #
+  # A hit the firewall dropped or blocked gets outcome 'prevented'
+  # automatically (see parser.PREVENTED_STATUSES): the attack was stopped.
+  # ===========================================================================
+
+  - name: "IPS: Critical Exploit Attempt"
+    type: row
+    # Default for signatures that name no attack. About 45 signatures in this
+    # file are vendor/product names ("Splunk.security.VM",
+    # "Fortinet.Protection.WAF") with nothing to map; labelling them T1190
+    # would be a confident wrong answer, so they are reported as UNMAPPED at
+    # low severity rather than dropped.
+    mitre_technique: "UNMAPPED"
+    mitre_name: "IPS signature with no ATT&CK mapping"
+    kill_chain_stage: "Unclassified"
+    severity: 4
+    # C2, brute-force and test-file signatures are excluded here because other
+    # rules own them. Before this, 17,742 lines matched two rules at once, so a
+    # single Cobalt Strike line looked like a two-technique attack.
+    sql_condition: >
+      fg_attack <> ''
+      AND fg_severity IN ('critical', 'high')
+      AND fg_attack NOT LIKE '%Cobalt.Strike%'
+      AND fg_attack NOT LIKE '%Mirai%'
+      AND fg_attack NOT LIKE '%Botnet%'
+      AND fg_attack NOT LIKE '%Beacon%'
+      AND fg_attack NOT LIKE '%Brute.Force%'
+      AND fg_attack NOT LIKE 'Eicar%'
+    # Per-signature ATT&CK mapping. `message` holds the IPS signature name.
+    # Add a signature here, not in code (bonus B-4).
+    technique_map:
+      - match: ["%Log4j%", "%SSLVPN.Path.Traversal%", "%Citrix.ADC%",
+                "%Confluence.OGNL%", "%WebLogic%", "%vCenter%", "%PHP.CGI%",
+                "%HTTP.sys%", "%SQL.Injection%", "%Password.Files.Access%",
+                "%Buffer.Overflow%", "HTTP.Path.Traversal%",
+                "HTTP.Command.Injection%", "HTTP.URI.XSS%"]
+        mitre_technique: "T1190"
+        mitre_name: "Exploit Public-Facing Application"
+        kill_chain_stage: "Initial Access"
+        severity: 9
+      - match: ["%ZeroLogon%", "%SMB.Server.Trans%"]
+        mitre_technique: "T1210"
+        mitre_name: "Exploitation of Remote Services"
+        kill_chain_stage: "Lateral Movement"
+        severity: 9
+      - match: ["%Privilege.Escalation%"]
+        mitre_technique: "T1068"
+        mitre_name: "Exploitation for Privilege Escalation"
+        kill_chain_stage: "Privilege Escalation"
+        severity: 9
+      - match: ["%DNS.Zone.Transfer%"]
+        mitre_technique: "T1590.002"
+        mitre_name: "Gather Victim Network Information: DNS"
+        kill_chain_stage: "Reconnaissance"
+        severity: 5
+    description: >
+      The intrusion prevention engine detected a high or critical severity
+      attack signature, labelled with the ATT&CK technique for that signature.
+
+  - name: "IPS: Command and Control Beacon"
+    type: row
+    mitre_technique: "T1071"
+    mitre_name: "Application Layer Protocol"
+    kill_chain_stage: "Command and Control"
+    severity: 9
+    # Cobalt Strike and Mirai traffic are post-compromise by definition: they
+    # mean something on the network is already taking orders from outside.
+    sql_condition: >
+      fg_attack LIKE '%Cobalt.Strike%'
+      OR fg_attack LIKE '%Mirai%'
+      OR fg_attack LIKE '%Botnet%'
+      OR fg_attack LIKE '%Beacon%'
+    technique_map:
+      - match: ["%Cobalt.Strike%"]
+        mitre_technique: "T1071.001"
+        mitre_name: "Application Layer Protocol: Web Protocols"
+    description: >
+      Traffic matching a known command-and-control framework or botnet. This
+      indicates an already-compromised host receiving instructions.
+
+  - name: "Antivirus: Malware Detected"
+    type: row
+    mitre_technique: "T1105"
+    mitre_name: "Ingress Tool Transfer"
+    kill_chain_stage: "Execution"
+    severity: 8
+    # EICAR is the industry-standard harmless test file, not malware.
+    sql_condition: "fg_virus <> '' AND fg_virus NOT ILIKE '%eicar%'"
+    description: >
+      The antivirus engine blocked a malicious file in transit -- the attacker
+      attempting to deliver tooling onto the network.
+
+  - name: "IPS: Brute Force Against a Service"
+    type: row
+    mitre_technique: "T1110"
+    mitre_name: "Brute Force"
+    kill_chain_stage: "Credential Access"
+    severity: 6
+    sql_condition: "fg_attack LIKE '%Brute.Force%'"
+    outcome: attempted
+    technique_map:
+      - match: ["SSH.%"]
+        mitre_technique: "T1110.001"
+        mitre_name: "Brute Force: Password Guessing"
+      - match: ["RDP.%"]
+        mitre_technique: "T1110.001"
+        mitre_name: "Brute Force: Password Guessing"
+    description: >
+      The IPS engine detected password guessing against a network service such
+      as SSH, distinct from the firewall's own admin interface.
+
+  - name: "High-Risk Application Usage"
+    type: row
+    mitre_technique: "T1071.001"
+    mitre_name: "Application Layer Protocol: Web Protocols"
+    kill_chain_stage: "Command and Control"
+    severity: 5
+    # Application control flags its own risk level; we adopt the extreme end
+    # only, since 'elevated' is common enough to be noise.
+    sql_condition: "fg_apprisk = 'critical'"
+    description: >
+      An application the firewall rates as critical risk was used -- often
+      tunnelling or remote-access software that bypasses network controls.

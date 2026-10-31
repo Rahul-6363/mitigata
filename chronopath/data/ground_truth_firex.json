@@ -1,0 +1,89 @@
+{
+  "incident": "FIREX-INC-01",
+  "source": "firex-10G.log (6.54 GB, 9,125,382 FortiGate syslog events)",
+  "how_this_was_derived": "Not supplied by the organisers -- reconstructed by querying the real file for its rarest security-relevant events. Among 9,125,382 records there are 1,272,524 failed admin logins but only 5 successes, 4 VPN tunnel events, 3 configuration changes and 2 admin-account object changes. Those 14 rare events are the planted attack; everything else is background noise. The derivation is reproducible: see scripts/discover_firex.py.",
+  "description": "Multi-stage intrusion against a FortiGate firewall: reconnaissance by mass credential guessing, defence evasion by disabling logging and purging policy, successful administrative access from several external addresses, and finally a create-use-delete admin account cycle.",
+  "steps": [
+    {
+      "step": 1,
+      "stage": "Defense Evasion",
+      "technique": "T1562",
+      "label_note": "Was T1562.002 (Disable Windows Event Logging), which does not apply to a firewall's disk log; corrected to the parent technique, Impair Defenses.",
+      "timestamp": "2026-10-23T16:31:43",
+      "host": "10.10.99.1",
+      "user": "Tejas.Roy",
+      "src_ip": "78.120.139.0",
+      "evidence": "Attribute 'status' of setting 'log disk setting' changed from 'enable' to 'disable'"
+    },
+    {
+      "step": 2,
+      "stage": "Defense Evasion",
+      "technique": "T1562.004",
+      "timestamp": "2026-10-23T18:28:52",
+      "host": "10.10.99.1",
+      "user": "Tejas.Roy",
+      "src_ip": "78.120.139.0",
+      "evidence": "Objects of 'firewall policy' were purged -- while logging was off"
+    },
+    {
+      "step": 3,
+      "stage": "Initial Access",
+      "technique": "T1078",
+      "timestamp": "2026-10-24T19:59:30",
+      "host": "10.10.99.1",
+      "user": "parul.sinha",
+      "src_ip": "8.42.69.77",
+      "evidence": "Administrator parul.sinha logged in successfully from https(8.42.69.77)"
+    },
+    {
+      "step": 4,
+      "stage": "Initial Access",
+      "technique": "T1133",
+      "timestamp": "2026-10-28T02:15:27",
+      "host": "10.10.99.1",
+      "user": "keerat.ghughal",
+      "src_ip": "102.8.77.227",
+      "evidence": "SSL VPN tunnel up; same account also used from 9.222.114.167 within 22 minutes"
+    },
+    {
+      "step": 5,
+      "stage": "Initial Access",
+      "technique": "T1078",
+      "timestamp": "2026-10-28T03:17:00",
+      "host": "10.10.99.1",
+      "user": "Deepika.Khan",
+      "src_ip": "171.104.84.193",
+      "evidence": "Administrator login successful, repeated at 03:47 and 04:17 from the same IP"
+    },
+    {
+      "step": 6,
+      "stage": "Persistence",
+      "technique": "T1136",
+      "timestamp": "2026-10-29T03:55:43",
+      "host": "10.10.99.1",
+      "user": "Rakes",
+      "src_ip": "203.228.177.117",
+      "evidence": "Add system.admin svc_backup30"
+    },
+    {
+      "step": 7,
+      "stage": "Initial Access",
+      "technique": "T1078",
+      "timestamp": "2026-10-29T04:02:01",
+      "host": "10.10.99.1",
+      "user": "svc_backup30",
+      "src_ip": "203.228.177.117",
+      "evidence": "Administrator svc_backup30 logged in successfully -- 6 minutes after the account was created"
+    },
+    {
+      "step": 8,
+      "stage": "Defense Evasion",
+      "technique": "T1070",
+      "timestamp": "2026-10-29T04:07:25",
+      "host": "10.10.99.1",
+      "user": "Rakes",
+      "src_ip": "203.228.177.117",
+      "evidence": "Delete system.admin svc_backup30 -- account destroyed 12 minutes after creation"
+    }
+  ]
+}

@@ -1,0 +1,94 @@
+# =============================================================================
+# Asset and Privilege Inventory -- the real FortiGate network (firex-10G.log)
+# =============================================================================
+#
+# WHY A SECOND INVENTORY FILE
+# ---------------------------
+# `assets.yaml` describes our own synthetic network, where machines have names
+# like HR-07 and FS-02. The real data set identifies machines only by IP
+# (10.10.99.1, 10.10.20.20), so none of those names match and the look-ahead
+# feature (FR-6) returned nothing at all on the real file.
+#
+# This file is the same idea keyed to the real addresses. The parser picks it
+# automatically when the logs are FortiGate.
+#
+# WHY LOGS ALONE CANNOT ANSWER "WHAT COULD THEY REACH NEXT?"
+# -----------------------------------------------------------
+# Logs record what DID happen, not what is PERMITTED. A compromised firewall
+# admin account can reach every device the firewall fronts, but the log only
+# shows the ones it actually touched. The untouched ones are the real exposure
+# and are invisible without an inventory.
+#
+# Real SOC platforms join log data against a CMDB or Active Directory. This
+# file is a small, readable stand-in for that -- and we say so openly, because
+# understanding the difference between observed behaviour and standing
+# privilege is the whole point of the feature.
+#
+# WHERE THESE VALUES COME FROM
+# ----------------------------
+# Measured from the log file itself, not invented. Querying all 9,125,382
+# events for internal destinations and their firewall interface roles gives:
+#
+#     10.10.99.x   role "lan"   1,272,405 events   <- management / internal
+#     10.10.20.x   role "dmz"   1,069,032 events   <- DMZ, internet-facing
+#
+# and the detections land on exactly two addresses: 10.10.99.1 (the firewall's
+# own management interface, where every admin login lands) and 10.10.20.20 (a
+# DMZ host taking the brunt of the exploit traffic).
+# =============================================================================
+
+# `criticality` (1-10) drives the UI warning and sorts the look-ahead list, so
+# a domain controller one hop away becomes the headline rather than a footnote.
+hosts:
+  10.10.99.1:
+    role: "FortiGate Firewall - Management Interface"
+    criticality: 10
+  10.10.99.10:
+    role: "Internal Server (LAN)"
+    criticality: 8
+  10.10.99.20:
+    role: "Internal Server (LAN)"
+    criticality: 8
+  10.10.20.20:
+    role: "DMZ Host - Internet Facing"
+    criticality: 7
+  10.10.20.11:
+    role: "DMZ Host"
+    criticality: 6
+  10.10.40.0/24:
+    role: "User Workstation Subnet"
+    criticality: 4
+
+# What administrative access to each system grants.
+#
+# The key entry is "FortiGate Administrator". Whoever holds it controls the
+# firewall, and therefore controls what traffic is permitted to every network
+# behind it -- which is why compromising it is so much worse than compromising
+# any single server.
+groups:
+  FortiGate Administrator:
+    grants_admin_on:
+      - "10.10.99.1"
+      - "10.10.99.10"
+      - "10.10.99.20"
+      - "10.10.20.20"
+      - "10.10.20.11"
+      - "10.10.40.0/24"
+  VPN User:
+    grants_admin_on:
+      - "10.10.99.10"
+      - "10.10.20.20"
+
+# Accounts seen in the real data, and what they hold.
+#
+# Every account below appears in firex-10G.log. svc_backup30 is the account the
+# attacker CREATED at 03:55 and DELETED at 04:07 -- listing it as a firewall
+# administrator is what lets the look-ahead answer "and from there they could
+# have reached everything behind this firewall".
+accounts:
+  Rakes:            ["FortiGate Administrator"]
+  svc_backup30:     ["FortiGate Administrator"]
+  Deepika.Khan:     ["FortiGate Administrator"]
+  parul.sinha:      ["FortiGate Administrator"]
+  Tejas.Roy:        ["FortiGate Administrator"]
+  keerat.ghughal:   ["VPN User"]

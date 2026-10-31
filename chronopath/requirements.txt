@@ -1,0 +1,13 @@
+# ChronoPath dependencies
+#
+# WHY THESE VERSIONS: every pin below was installed and imported successfully on the
+# actual demo machine (Windows 11, Python 3.14.2, 16 GB RAM) before being written here.
+# Python 3.14 is new enough that package availability was a real risk, so nothing here
+# is assumed -- it was all verified.
+
+duckdb==2.0.0            # Streaming SQL engine. Scans 15 GB without loading it into RAM.
+networkx==3.6.1          # In-memory attack graph. Pure Python, no server to install.
+streamlit==1.66.1        # Browser dashboard in ~40 lines, no frontend work.
+pyyaml                   # Reads rules.yaml, so new detections need no code change (B-4).
+groq==1.7.0              # Free LLM API, writes the plain-English incident report (B-2).
+psutil                   # Measures peak RSS in benchmark.py to prove the memory claim.

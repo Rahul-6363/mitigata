@@ -1,0 +1,5 @@
+# Large data sets: regenerate or download, never commit (GitHub limit is 100 MB)
+firex-10G.log
+*.log
+chronopath/raw.json
+chronopath/data/edr_ready.json

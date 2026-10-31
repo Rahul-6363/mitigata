@@ -1,0 +1,11 @@
+# Generated data and databases - large, reproducible, never commit
+data/*.ndjson
+data/ground_truth.json
+*.db
+tmp_spill/
+__pycache__/
+*.pyc
+.env
+
+# Keep the template committed so others know what to create
+!.env.example

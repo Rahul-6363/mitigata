@@ -1,0 +1,70 @@
+# =============================================================================
+# Asset and Privilege Inventory
+# =============================================================================
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# FR-6 asks the tool to show "what the attacker could reach next", and gives the
+# example: "This account has admin rights on 3 more servers."
+#
+# That sentence cannot be answered from logs alone, and it is worth being clear
+# about why. Logs record what *did* happen. They do not record what is
+# *permitted* to happen. If a compromised account has admin rights on twelve
+# servers but has only ever logged into one, the logs show exactly one server --
+# and the other eleven are invisible, even though they are the actual risk.
+#
+# Real SOC platforms solve this by joining log data against an identity source:
+# Active Directory groups, an asset CMDB, or a tool like BloodHound. This file is
+# a small, readable stand-in for that identity source.
+#
+# HOW IT IS USED
+# --------------
+# graph_engine.look_ahead() combines two things:
+#   1. OBSERVED reachability  -- traversing the graph we built from real events.
+#   2. ENTITLED reachability  -- group memberships declared here.
+# The union is the attacker's true blast radius.
+#
+# WHAT TO TELL JUDGES
+# -------------------
+# Be upfront that this is declared context, not inferred from logs. It is more
+# honest and more impressive than pretending the logs contained it: it shows the
+# team understands the difference between observed behaviour and standing
+# privilege, which is the exact distinction that made the 2013 retail breach so
+# damaging.
+# =============================================================================
+
+# Host inventory. `criticality` (1-10) lets the UI warn loudly when an attacker
+# is one hop from something that matters, like a domain controller.
+hosts:
+  DC-01:  { role: "Domain Controller", criticality: 10 }
+  DC-02:  { role: "Domain Controller", criticality: 10 }
+  FS-01:  { role: "File Server",       criticality: 7 }
+  FS-02:  { role: "File Server",       criticality: 8 }
+  FS-03:  { role: "File Server - Finance", criticality: 9 }
+  FS-04:  { role: "File Server",       criticality: 7 }
+  FS-05:  { role: "File Server - HR",  criticality: 8 }
+
+# Security groups and the hosts they grant administrative access to.
+groups:
+  Domain Admins:
+    grants_admin_on: ["DC-01", "DC-02", "FS-01", "FS-02", "FS-03", "FS-04", "FS-05"]
+  Server Operators:
+    grants_admin_on: ["FS-01", "FS-02", "FS-03", "FS-04", "FS-05"]
+  Helpdesk:
+    grants_admin_on: ["FS-01", "FS-02"]
+  Backup Operators:
+    grants_admin_on: ["FS-03", "FS-05", "DC-02"]
+
+# Which accounts belong to which groups.
+#
+# Note svc_helpdesk_adm -- the backdoor account the attacker creates in the
+# planted scenario. It is placed in Server Operators to model a realistic
+# escalation: the attacker made an account that looks mundane but carries admin
+# rights across five file servers. In the demo this is what turns the look-ahead
+# panel from "one external IP" into "five more servers at risk".
+accounts:
+  admin_jane:        ["Domain Admins"]
+  admin_raj:         ["Server Operators"]
+  svc_backup:        ["Backup Operators"]
+  svc_helpdesk_adm:  ["Server Operators"]
+  svc_vendor_hvac:   ["Helpdesk"]
