@@ -13,9 +13,3 @@ __pycache__/
 
 # Investigator memory (one JSON file per incident, analyst-specific)
 investigations/
-
-# Live mode output and inputs
-live.db
-live.db-wal
-live.db-shm
-data/live*.ndjson

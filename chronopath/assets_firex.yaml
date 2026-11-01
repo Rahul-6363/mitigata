@@ -67,6 +67,18 @@ hosts:
 # any single server.
 groups:
   FortiGate Administrator:
+    # Membership PROVEN BY THE LOGS: only a FortiGate administrator can log in
+    # to the management interface, create or delete admin accounts, disable
+    # logging or purge policy objects. An account seen doing any of these
+    # (and succeeding) holds this role, whether or not it is listed below --
+    # which is what makes the look-ahead work on a log whose accounts were
+    # never typed into this file (firex-30G.log: chirag._Team, svc_backup57,
+    # harshit.verma, farrukh.ansari).
+    evidenced_by:
+      - "Admin Login Successful"
+      - "Firewall Admin Account"
+      - "Firewall Logging Disabled"
+      - "Firewall Policy Objects Purged"
     grants_admin_on:
       - "10.10.99.1"
       - "10.10.99.10"
@@ -75,6 +87,9 @@ groups:
       - "10.10.20.11"
       - "10.10.40.0/24"
   VPN User:
+    # A successful SSL VPN session proves the account holds VPN access.
+    evidenced_by:
+      - "SSL VPN"
     grants_admin_on:
       - "10.10.99.10"
       - "10.10.20.20"

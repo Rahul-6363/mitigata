@@ -717,8 +717,37 @@ def _union_and_rank(events, context_links, estate_wide, window_minutes):
     # A group survives if it is either high-risk OR a multi-step sequence.
     kept, suppressed, blocked = [], [], []
     for c in candidates:
-        {"reported": kept, "suppressed": suppressed, "blocked": blocked}[
-            triage(c)].append(c)
+        # BLOCKED THREATS ARE NOT INCIDENTS. If every detection in a group was
+        # stopped by a control (IPS dropped it, AV blocked it) or only shows an
+        # attempt (failed logins, no success), nothing was compromised. That is
+        # the triage line a SOC draws between an alert and an incident. On the
+        # FortiGate data ten of fourteen "incidents" were exactly this and were
+        # the bulk of the false alarm rate. They are counted and listed
+        # separately, never hidden.
+        if all(e.get("outcome") in NON_COMPROMISE_OUTCOMES for e in c["events"]):
+            blocked.append(c)
+            continue
+        distinct_steps = len({e["mitre_technique"] for e in c["events"]})
+        # A maximum-severity detection is always reported, however isolated.
+        #
+        # WHY: on the real FortiGate data, "firewall logging disabled",
+        # "firewall policy purged" and "VPN credential used from two
+        # countries" each correlated into a group of ONE event, scored below
+        # the noise threshold, and were silently dropped -- costing three of
+        # the eight planted attack steps.
+        #
+        # Those are severity-10 rules precisely because they are never
+        # routine: nobody legitimately turns off the logs on a production
+        # firewall. Suppression exists to hide weak, repetitive signals, not
+        # rare and unambiguous ones. A single severity-10 event is a finding
+        # on its own, so rarity overrides the volume-based threshold.
+        has_critical = any(e["severity"] >= 10 for e in c["events"])
+        if (has_critical
+                or c["risk_score"] >= MIN_INCIDENT_RISK
+                or distinct_steps >= MIN_STEPS_TO_ALWAYS_REPORT):
+            kept.append(c)
+        else:
+            suppressed.append(c)
 
     # Worst first, so the analyst sees the real attack immediately (bonus B-1).
     kept.sort(key=lambda i: i["risk_score"], reverse=True)
@@ -741,44 +770,6 @@ def _union_and_rank(events, context_links, estate_wide, window_minutes):
             c["detection_count"] for c in blocked)
         kept[0]["_estate_wide"] = estate_wide
     return kept
-
-
-def triage(c):
-    """
-    'reported', 'suppressed' or 'blocked' for one candidate incident.
-
-    Shared by batch correlation and live mode (live_detector.py), so both draw
-    the line between an alert and an incident in exactly the same place.
-    """
-    # BLOCKED THREATS ARE NOT INCIDENTS. If every detection in a group was
-    # stopped by a control (IPS dropped it, AV blocked it) or only shows an
-    # attempt (failed logins, no success), nothing was compromised. That is
-    # the triage line a SOC draws between an alert and an incident. On the
-    # FortiGate data ten of fourteen "incidents" were exactly this and were
-    # the bulk of the false alarm rate. They are counted and listed
-    # separately, never hidden.
-    if all(e.get("outcome") in NON_COMPROMISE_OUTCOMES for e in c["events"]):
-        return "blocked"
-    distinct_steps = len({e["mitre_technique"] for e in c["events"]})
-    # A maximum-severity detection is always reported, however isolated.
-    #
-    # WHY: on the real FortiGate data, "firewall logging disabled",
-    # "firewall policy purged" and "VPN credential used from two
-    # countries" each correlated into a group of ONE event, scored below
-    # the noise threshold, and were silently dropped -- costing three of
-    # the eight planted attack steps.
-    #
-    # Those are severity-10 rules precisely because they are never
-    # routine: nobody legitimately turns off the logs on a production
-    # firewall. Suppression exists to hide weak, repetitive signals, not
-    # rare and unambiguous ones. A single severity-10 event is a finding
-    # on its own, so rarity overrides the volume-based threshold.
-    has_critical = any(e["severity"] >= 10 for e in c["events"])
-    if (has_critical
-            or c["risk_score"] >= MIN_INCIDENT_RISK
-            or distinct_steps >= MIN_STEPS_TO_ALWAYS_REPORT):
-        return "reported"
-    return "suppressed"
 
 
 def risk_score(events):
@@ -1072,8 +1063,17 @@ def look_ahead(incident, hop_limit=None, assets_path="assets.yaml"):
             }
 
     # --- 2. Entitled reachability (standing privilege) --------------------
+    # Memberships come from two places: the inventory's account list, and the
+    # incident's own evidence (a group's `evidenced_by` detections). WHY the
+    # second: the inventory was written for one log; on a new log every
+    # account is unknown and the look-ahead silently returned nothing, even
+    # though the logs prove what each account is -- only a firewall
+    # administrator can log in to the management interface.
+    proof = _evidenced_memberships(incident["events"], assets["groups"])
     for user in compromised_users:
-        for group in assets["accounts"].get(user, []):
+        groups = list(assets["accounts"].get(user, []))
+        groups += [g for g in proof.get(user, {}) if g not in groups]
+        for group in groups:
             for host in assets["groups"].get(group, {}).get("grants_admin_on", []):
                 if host in compromised_hosts:
                     continue  # already owned; not a "next" step
@@ -1085,7 +1085,9 @@ def look_ahead(incident, hop_limit=None, assets_path="assets.yaml"):
                     "target": host,
                     "kind": "host",
                     "basis": "privilege",
-                    "reason": f"'{user}' holds admin rights via '{group}'",
+                    "reason": (f"'{user}' holds admin rights via '{group}'"
+                               + (f" (shown in the logs: {proof[user][group]})"
+                                  if group in proof.get(user, {}) else "")),
                     "reachable_via": (existing or {}).get("reachable_via", [user]) or [user],
                     "criticality": info.get("criticality", 0),
                     "role": info.get("role", ""),
@@ -1094,6 +1096,25 @@ def look_ahead(incident, hop_limit=None, assets_path="assets.yaml"):
     # Most critical first: a domain controller one hop away is the headline.
     return sorted(results.values(),
                   key=lambda r: (-r["criticality"], r["target"]))
+
+
+def _evidenced_memberships(events, groups):
+    """
+    {user: {group: "<detection> at <time>"}} for every group whose
+    `evidenced_by` detections the user performed successfully. The first such
+    event is quoted, so the analyst can check the claim against the timeline.
+    """
+    out = {}
+    for e in sorted(events, key=lambda e: str(e["timestamp"])):
+        user = e.get("user")
+        if not user or e.get("outcome") in NON_COMPROMISE_OUTCOMES:
+            continue
+        rule = e.get("rule_name") or ""
+        for group, spec in groups.items():
+            if any(m in rule for m in (spec or {}).get("evidenced_by", [])):
+                out.setdefault(user, {}).setdefault(
+                    group, f"{rule} at {str(e['timestamp'])[:19]}")
+    return out
 
 
 def summarise_for_llm(incident, links=None):

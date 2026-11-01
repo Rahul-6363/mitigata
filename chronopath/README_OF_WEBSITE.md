@@ -26,8 +26,7 @@ appear, and there is a [glossary](#glossary) at the end.
 12. [What's next](#12-whats-next)
 13. [Threat hunting](#13-threat-hunting)
 14. [Sources](#14-sources)
-15. [Live mode](#15-live-mode)
-16. [The same features without the website](#16-the-same-features-without-the-website)
+15. [The same features without the website](#15-the-same-features-without-the-website)
 16. [Glossary](#glossary)
 
 ---
@@ -545,52 +544,7 @@ For each input file:
 
 ---
 
-## 15. Live mode
-
-**Question it answers:** *What is happening right now?*
-
-Choose **Live** under **Mode** at the top of the sidebar. Instead of a finished
-analysis, this page follows a log file that is still being written, through
-`src/live_detector.py`, and refreshes itself every 3 seconds.
-
-**Starting it** (three terminals, from the `chronopath` folder):
-
-```powershell
-python src/live_detector.py --input data/live.ndjson
-python scripts/replay.py --source data/sample.ndjson --target data/live.ndjson --start 2026-10-20T12:50:00 --speed 10
-streamlit run src/app.py
-```
-
-The second command plays the recorded sample attack into the file at ten times
-real speed, so the attack unfolds in about three minutes.
-
-**What the page shows**
-
-| Part | Meaning | Example (mid-replay) |
-|---|---|---|
-| Lines / s | How fast new log lines are arriving | 134 |
-| Alerts | Detections so far | 8 |
-| Incidents | Reported incidents so far | 1 |
-| Latency p50 | Typical delay from a line being written to its alert appearing | 1.85 s |
-| Last tick | When the detector last processed new lines | 1 s ago |
-| Incidents table | Live incidents, highest risk first. **Version** goes up each time an incident gains a step | `L00001`, risk 86, 8 steps, version 9 |
-| Graph and steps | The selected incident, drawn exactly as in Investigate mode | the vendor account → HR-07 → FS-02 → external IP |
-| Write narrative | The AI summary, written **only when clicked** and remembered for that version | built-in summary until clicked |
-| Newest alerts | The last 25 detections, each with its own latency | *Large Outbound Data Transfer — 0.10 s* |
-
-**Good to know**
-
-* It is **micro-batch**: new lines are processed every 2 seconds, so results
-  appear about 1–2 seconds after a line is written, not instantly.
-* It uses the same rules and the same scoring as Investigate mode; on the same
-  data both produce the same incidents.
-* Live incidents are named `L00001`, `L00002`, ... rather than `INC-01`, because
-  their ranking changes while the attack is still happening.
-* If the detector stops, the page says so and keeps showing the final state.
-
----
-
-## 16. The same features without the website
+## 15. The same features without the website
 
 | Want | Command |
 |---|---|
@@ -599,8 +553,6 @@ real speed, so the attack unfolds in about three minutes.
 | Ask one question | `python src/investigate.py --db firex30.db --ask "What am I missing?"` |
 | Interactive investigator | `python src/investigate.py --db firex30.db --chat` |
 | REST API | `python src/api.py`, then e.g. `GET /incidents`, `/incidents/INC-01/path`, `/incidents/INC-01/elliot`, `/incidents/INC-01/elliot/ask?q=...` |
-| Live detection | `python src/live_detector.py --input data/live.ndjson` |
-| Replay a log into it | `python scripts/replay.py --source data/sample.ndjson --target data/live.ndjson --speed 10` |
 | Check the whole project | `python verify.py` |
 
 ---
@@ -621,5 +573,3 @@ real speed, so the attack unfolds in about three minutes.
 | **Blind window** | A period when someone tried to stop logging. |
 | **Telemetry** | The logs and signals a system produces. |
 | **Prediction** | Something that *could* happen next. Never observed activity. |
-| **Micro-batch** | Processing new data in small groups every few seconds, instead of one line at a time. |
-| **Latency** | The delay between a log line being written and its alert appearing. |

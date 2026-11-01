@@ -679,6 +679,21 @@ def fetch_raw_lines(log_path, incident, max_lines=MAX_RAW_LINES):
     if not log_path or not os.path.exists(log_path):
         return []
 
+    # FortiGate: reuse enrich_from_source()'s scan -- fixed-offset timestamp,
+    # one dict lookup per line, and it stops once every detection has its
+    # line. The generic loop below runs several substring tests on every line
+    # and never stops early; on firex-30G.log (19.6 GB) it took many minutes.
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        fortigate = f.readline().startswith("date=")
+    if fortigate:
+        events = [dict(e) for e in incident.get("events") or []]
+        enrich_from_source(log_path, [{"events": events}])
+        found = []
+        for e in events:
+            if e.get("raw_line") and e["raw_line"] not in found:
+                found.append(e["raw_line"])
+        return found[:max_lines]
+
     wanted = []
     for e in incident.get("events") or []:
         ts = str(e.get("timestamp") or "")
