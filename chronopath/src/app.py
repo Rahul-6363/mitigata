@@ -176,8 +176,14 @@ code, pre, .stCode, [data-testid="stCode"] * {
 }
 
 /* Streamlit chrome off: no coloured top strip, toolbar or footer. */
-header[data-testid="stHeader"] { background: transparent; height: 0; }
-[data-testid="stDecoration"], [data-testid="stToolbar"], footer { display: none; }
+header[data-testid="stHeader"] { background: transparent; }
+/* The toolbar stays: in Streamlit 1.66 the "open sidebar" arrow sits inside
+   it, so hiding the toolbar left no way back once the sidebar was closed.
+   Only its other buttons (deploy, menu, status) are hidden. */
+[data-testid="stToolbarActions"], [data-testid="stMainMenu"],
+[data-testid="stAppDeployButton"], [data-testid="stStatusWidget"] { display: none; }
+[data-testid="stExpandSidebarButton"] { display: inline-flex !important; }
+[data-testid="stDecoration"], footer { display: none; }
 
 /* A centred reading column, like a page of text. */
 [data-testid="stMainBlockContainer"], .block-container {
