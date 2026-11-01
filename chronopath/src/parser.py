@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ecs_adapter  # noqa: E402
 import applog_adapter  # noqa: E402
 import fortigate_adapter  # noqa: E402
+import inferred_adapter  # noqa: E402
 from chronopath2 import streams  # noqa: E402
 
 # The log schema. Declaring it explicitly is a deliberate performance decision --
@@ -64,7 +65,7 @@ DEFAULT_DB = "chronopath.db"
 
 def detect_format(log_path):
     """
-    Work out which of the four supported log formats this file is.
+    Work out which of the supported log formats this file is.
 
     Auto-detection rather than a mandatory flag, because the judges will point
     the tool at their own file and a wrong flag yields a baffling empty result
@@ -78,14 +79,60 @@ def detect_format(log_path):
                    (edr_log_generator.py)
         flat       JSON with top-level "timestamp" and scalar "host"
                    (our own sample generator)
+        inferred   anything else whose columns can be inferred from a sample:
+                   renamed keys, headerless CSV, epoch timestamps
+                   (inferred_adapter.py)
 
-    Only the first handful of lines is read, so this is free even on 6.5 GB.
+    Only the first few hundred lines are read, so this is free even on 6.5 GB.
+
+    WHY "inferred" comes last and only when flat does not fit cleanly: the
+    four known formats must be read exactly as before. Before it existed,
+    every unrecognised file defaulted to flat and returned zero detections
+    with no explanation.
     """
     if fortigate_adapter.detect_fortigate(log_path):
         return "fortigate"
     if applog_adapter.detect_applog(log_path):
         return "applog"
-    return ecs_adapter.detect_format(log_path)
+    fmt = ecs_adapter.detect_format(log_path)
+    if fmt == "ecs" or _is_clean_flat(log_path):
+        return fmt
+    if inferred_adapter.detect_inferred(log_path):
+        return "inferred"
+    return "flat"
+
+
+def _is_clean_flat(log_path, sample_lines=50):
+    """
+    True when the file really is our flat JSON: the schema's own key names,
+    and an ISO timestamp. A JSON file with renamed keys or epoch timestamps
+    also has no nested "event", but the flat reader would see NULLs in it.
+    """
+    import json
+    keys, iso, seen = set(), 0, 0
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if seen >= sample_lines:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                seen += 1
+                keys |= set(rec)
+                ts = rec.get("timestamp")
+                if isinstance(ts, str) and len(ts) >= 19 and ts[4] == "-" and ts[10] in "T ":
+                    iso += 1
+    except OSError:
+        return False
+    return (seen > 0 and iso >= 0.8 * seen
+            and len(keys & set(LOG_SCHEMA)) >= 0.8 * len(LOG_SCHEMA))
 
 
 def load_rules(path="rules.yaml"):
@@ -184,6 +231,13 @@ def source_expr(log_path, log_format=None):
         return applog_adapter.applog_source_expr(log_path)
     if log_format == "ecs":
         return ecs_adapter.ecs_source_expr(log_path)
+    if log_format == "inferred":
+        mapping = inferred_adapter.detect_inferred(log_path)
+        if mapping is None:
+            raise ValueError(
+                f"Could not infer the layout of {log_path}: "
+                f"{inferred_adapter.why_not(log_path)}.")
+        return inferred_adapter.inferred_source_expr(log_path, mapping)
 
     cols = ", ".join(f"{k}: '{v}'" for k, v in LOG_SCHEMA.items())
     return f"read_ndjson('{log_path}', columns={{{cols}}}, ignore_errors=true)"
@@ -493,6 +547,14 @@ def run(log_path, rules_path=None, db_path=DEFAULT_DB,
     """
     if log_format is None:
         log_format = detect_format(log_path)
+    mapping = None
+    if log_format == "inferred":
+        mapping = inferred_adapter.detect_inferred(log_path)
+        if mapping is None:
+            raise SystemExit(f"Could not infer the layout of {log_path}: "
+                             f"{inferred_adapter.why_not(log_path)}.")
+    if rules_path is None and mapping is not None:
+        rules_path = mapping["rules"]
     if rules_path is None:
         rules_path = {"ecs": "rules_ecs.yaml",
                       "fortigate": "rules_fortigate.yaml",
@@ -508,6 +570,12 @@ def run(log_path, rules_path=None, db_path=DEFAULT_DB,
     print(f"  rules    {len(rules)} loaded from {rules_path}")
     print(f"  memory   capped at {memory_limit}, spilling to ./tmp_spill")
     print()
+    if mapping is not None:
+        # stderr, so the mapping is seen even when stdout is redirected, and
+        # a rule left blind by a missing column is never a silent zero.
+        sys.stdout.flush()
+        blind = inferred_adapter.report(mapping, rules)
+        sys.stderr.flush()
 
     # Delete any previous database so a re-run is clean and repeatable.
     if os.path.exists(db_path):
@@ -613,6 +681,13 @@ def run(log_path, rules_path=None, db_path=DEFAULT_DB,
     con.close()
 
     throughput = size_gb * 1000 / elapsed if elapsed > 0 else 0
+    if mapping is not None and total == 0:
+        print(f"\n  NO DETECTIONS on an inferred layout (confidence "
+              f"{mapping['confidence']:.2f}). "
+              + (f"Unmapped fields the rules need: {', '.join(sorted(blind))}. "
+                 if blind else "Every field the rules need was mapped. ")
+              + "Check the mapping printed above before trusting this.",
+              file=sys.stderr)
     print()
     print(f"  {total} suspicious events written to {db_path}")
     print(f"  scanned {size_gb:.2f} GB in {elapsed:.1f}s  (~{throughput:.0f} MB/s)")
@@ -629,7 +704,7 @@ def main():
     ap.add_argument("--input", default="data/sample.ndjson", help="NDJSON log file")
     ap.add_argument("--rules", default=None,
                     help="Rule file (default: auto-chosen from the log format)")
-    ap.add_argument("--format", choices=["ecs", "flat", "fortigate", "applog"],
+    ap.add_argument("--format", choices=["ecs", "flat", "fortigate", "applog", "inferred"],
                     default=None,
                     help="Force a log format instead of auto-detecting")
     ap.add_argument("--db", default=DEFAULT_DB)
