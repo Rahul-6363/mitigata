@@ -662,7 +662,14 @@ def observe(pack):
                 connection="", hypothesis="", counterargument="", unknowns="",
                 next_move="", cites=[]))
     findings.sort(key=lambda f: -f.priority)
-    return findings
+    # One finding per key. An account in two identity-pivot links produced two
+    # identical lifecycle findings, and two dashboard buttons with one key.
+    unique, seen = [], set()
+    for f in findings:
+        if f.key not in seen:
+            seen.add(f.key)
+            unique.append(f)
+    return unique
 
 
 # ---------------------------------------------------------------------------

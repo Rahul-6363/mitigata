@@ -650,6 +650,13 @@ def render_graph(incident):
                    f"They are in the Timeline tab.")
 
 
+@st.cache_data(show_spinner=False, max_entries=64)
+def cached_raw_lines(log_path, log_mtime, db_path, incident_id, _incident):
+    # Keyed on the file, its mtime and the incident; a second click is instant.
+    from chronopath2 import link_evidence
+    return link_evidence.fetch_raw_lines(log_path, _incident)
+
+
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
@@ -1086,8 +1093,11 @@ with tab_evidence:
             if not os.path.exists(log_for_raw):
                 st.error(f"Not found: {log_for_raw}")
             else:
-                with st.spinner("Scanning the source file..."):
-                    raw_lines = cp2_links.fetch_raw_lines(log_for_raw, incident)
+                with st.spinner("Scanning the source file (large files take "
+                                "up to about 30 s)..."):
+                    raw_lines = cached_raw_lines(
+                        log_for_raw, os.path.getmtime(log_for_raw),
+                        DB_PATH, incident["id"], incident)
                 if raw_lines:
                     st.success(f"{len(raw_lines)} line(s) found")
                     for raw in raw_lines:
